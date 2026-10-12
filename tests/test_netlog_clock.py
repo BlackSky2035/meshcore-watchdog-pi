@@ -1,6 +1,6 @@
 """Netzausfälle bei springender Uhr: Der Pi hat keine Echtzeituhr und stellt seine Zeit nach dem Start per Netz neu.
 
-Beispiel: Ein Ausfall mit Beginn 20:07:53 und Ende 20:05:53, also das Ende 120 s VOR dem Beginn (die Uhr wurde nach dem Start per Netz neu gestellt).
+Beispiel: Ein Ausfall mit Beginn 12:00:00 und Ende 11:58:00, also das Ende 120 s VOR dem Beginn (die Uhr wurde nach dem Start per Netz neu gestellt).
 """
 import json
 
