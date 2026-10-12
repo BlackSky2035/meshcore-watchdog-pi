@@ -1,0 +1,26 @@
+# Installation: sudo cp deploy/meshcore-watchdog.service /etc/systemd/system/
+#               sudo systemctl daemon-reload && sudo systemctl enable --now meshcore-watchdog
+# Nur Standardbibliothek: kein venv nötig (Python >= 3.11).
+[Unit]
+StartLimitIntervalSec=0
+Description=MeshCore Watchdog (Updates und Steuerung)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+Group=pi
+# systemd-journal: damit /api/log (journalctl -u meshcore-remote) wirklich Zeilen liefert statt leer zu bleiben.
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/home/pi/meshcore-watchdog
+ExecStart=/usr/bin/python3 -m watchdog --config /home/pi/meshcore-watchdog/config.toml
+Restart=always
+RestartSec=3
+# Selbstüberwachung: Der Watchdog meldet alle 15 s „lebt“, aber nur, wenn er sich selbst per HTTP erreichen kann.
+# Bleibt das Signal 60 s aus (Programm hängt), startet systemd ihn neu.
+WatchdogSec=60
+NotifyAccess=main
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

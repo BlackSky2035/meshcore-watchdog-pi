@@ -1,0 +1,19 @@
+# Installation: sudo cp deploy/meshcore-remote.service /etc/systemd/system/
+#               sudo systemctl daemon-reload && sudo systemctl enable --now meshcore-remote
+# Pfade und Benutzer ggf. anpassen. Der Benutzer braucht die Gruppe "dialout" (USB-Seriell).
+[Unit]
+Description=MeshCore Remote (Weboberfläche für den Node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+Group=pi
+SupplementaryGroups=dialout
+WorkingDirectory=/home/pi/meshcore-remote
+ExecStart=/home/pi/meshcore-remote/venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

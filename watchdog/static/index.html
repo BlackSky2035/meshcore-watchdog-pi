@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshCore Watchdog</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c2330; --muted:#6b7686; --line:#e1e5ec;
+          --accent:#1f6feb; --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f141b; --card:#171e28; --text:#e6ebf2; --muted:#8b97a8; --line:#263041;
+            --accent:#4c8dff; --ok:#3fb950; --bad:#f85149; --warn:#d29922; } }
+  * { box-sizing: border-box; }
+  html, body { overflow-x: hidden; }     /* letzte Sicherung: nichts soll die Seite je breiter als das Gerät machen */
+  body { margin:0; font:15px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--card);
+           border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; flex:1; }
+  main { max-width:760px; margin:0 auto; padding:16px; display:grid; gap:14px; }
+  /* min-width:0 nötig, weil .card ein Grid-Kind ist: ohne das darf ein langes, ungebrochenes Wort darin
+     (z. B. ein Dateipfad im Protokoll) das ganze Raster und damit die Seite nach rechts aufreißen. */
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; min-width:0; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 10px; }
+  dl { display:grid; grid-template-columns:max-content 1fr; gap:4px 14px; margin:0; }
+  dt { color:var(--muted); } dd { margin:0; word-break:break-all; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  button, input { font:inherit; padding:8px 12px; border-radius:8px; border:1px solid var(--line);
+                  background:var(--bg); color:var(--text); }
+  button { background:var(--accent); color:#fff; border:0; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  button.danger { background:transparent; color:var(--bad); border:1px solid var(--bad); }
+  button:disabled { opacity:.45; cursor:default; }
+  .pill { padding:3px 12px; border-radius:12px; color:#fff; font-size:13px; }
+  .pill.running { background:var(--ok); } .pill.unresponsive { background:var(--warn); }
+  .pill.stopped { background:var(--bad); } .pill.unknown { background:var(--muted); }
+  .muted { color:var(--muted); } .ok { color:var(--ok); } .err { color:var(--bad); } .warn { color:var(--warn); }
+  #log { font:13px/1.5 ui-monospace,monospace; max-height:300px; overflow:auto; white-space:pre-wrap; }
+  #log .t { color:var(--muted); }
+  /* Protokoll-Zeilen (echte Programmausgabe, z. B. lange Dateipfade in Fehlermeldungen) ohne Leerzeichen
+     brechen sonst nicht um und reißen die Seite nach rechts auf. */
+  #log, #appLog, #runLog { overflow-wrap: anywhere; }
+  ul { margin:6px 0 0; padding-left:20px; overflow-wrap: anywhere; }
+  .small { font-size:13px; }
+  input { max-width:100%; }
+  svg { max-width:100%; }
+  @media (max-width:480px) {
+    header { padding:10px 12px; gap:8px; }
+    header h1 { font-size:15px; }
+    main { padding:10px; gap:10px; }
+    .card { padding:12px; }
+    button, input { padding:7px 10px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>MeshCore Watchdog</h1>
+  <a id="appLink" href="#" target="_blank" rel="noopener" class="small" style="color:var(--accent)" hidden>Hauptprogramm ↗</a>
+  <span id="pill" class="pill unknown">…</span>
+</header>
+<main>
+  <section class="card" id="tokenCard" hidden>
+    <h2>Zugriffs-Token</h2>
+    <div class="row"><input id="token" type="password" placeholder="Token" autocomplete="off">
+      <button id="tokenSave" class="secondary">Merken (nur in dieser Sitzung)</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Programm</h2>
+    <dl id="info"></dl>
+    <p id="warnings" class="warn small"></p>
+  </section>
+
+  <section class="card" id="sysCard" hidden>
+    <h2>System</h2>
+    <dl id="sysInfo"></dl>
+    <div id="powerOut" class="small"></div>
+    <div id="netOut" class="small"></div>
+    <p class="muted small">Messungen des Watchdogs auf diesem Rechner. Ein Netzausfall wird gespeichert und hier nachträglich angezeigt; melden kann der Rechner ihn währenddessen nicht.</p>
+  </section>
+
+  <section class="card" id="histCard" hidden>
+    <h2>Verlauf</h2>
+    <svg id="histChart" viewBox="0 0 600 136" preserveAspectRatio="none" style="width:100%;height:136px;display:block"></svg>
+    <p id="histInfo" class="muted small"></p>
+    <p class="muted small">Temperatur seit dem Start des Rechners (die x-Achse zeigt die Betriebszeit, nicht ein festes
+      Zeitfenster, damit ältere Unterspannungen nicht aus der Anzeige verschwinden); rote Linien markieren Momente mit
+      Unterspannung. Aktualisiert sich selbst, auch von unterwegs über diese Seite.</p>
+  </section>
+
+  <section class="card" id="usbCard" hidden>
+    <h2>USB-Node</h2>
+    <div id="usbInfo"></div>
+    <p class="muted small">Eigene Prüfung des Watchdogs, unabhängig vom Hauptprogramm.</p>
+  </section>
+
+  <section class="card" id="maintCard" hidden>
+    <h2>Wartung</h2>
+    <p id="maintInfo" class="small"></p>
+    <div class="row"><button class="secondary" data-m="60">1 Stunde</button><button class="secondary" data-m="120">2 Stunden</button>
+      <button class="secondary" data-m="240">4 Stunden</button><button id="maintEnd" class="secondary" hidden>Wartung beenden</button></div>
+    <p class="muted small">Gibt den USB-Anschluss im Hauptprogramm frei und pausiert dort Senden und Meldungen; die USB-Warnung des Watchdogs schweigt.
+      Endet von selbst, höchstens 24 Stunden.</p>
+  </section>
+
+  <section class="card">
+    <h2>Updates</h2>
+    <div id="updateInfo" class="muted">noch nicht geprüft</div>
+    <div class="row" style="margin-top:10px">
+      <button id="check" class="secondary">Auf Updates prüfen</button>
+      <button id="update">Update installieren</button>
+      <button id="force" class="danger" hidden>Trotzdem erneut versuchen</button>
+    </div>
+    <p class="muted small">Beim Update wird das Programm kurz gestoppt, der neue Stand eingespielt und neu
+      gestartet. Läuft es danach nicht stabil, wird automatisch der vorherige Stand wiederhergestellt.</p>
+  </section>
+
+  <section class="card">
+    <h2>Steuerung</h2>
+    <div class="row">
+      <button id="restart" class="secondary">Neustart</button>
+      <button id="start" class="secondary">Starten</button>
+      <button id="stop" class="secondary">Stoppen</button>
+      <button id="rollback" class="danger">Zurück auf letzten guten Stand</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Ablauf</h2>
+    <p id="result" class="small"></p>
+    <div id="log"></div>
+    <h3 class="small muted" style="margin:14px 0 6px">Frühere Läufe</h3>
+    <div id="runList" class="small" style="max-height:160px;overflow:auto"></div>
+    <div id="runLog" class="small" style="display:none;margin-top:8px;max-height:260px;overflow:auto"></div>
+  </section>
+
+  <section class="card">
+    <h2>Programm-Protokoll</h2>
+    <div class="row small" style="gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      <label>Von <input type="datetime-local" id="logSince"></label>
+      <label>Bis <input type="datetime-local" id="logUntil"></label>
+      <button id="logLast24h" class="secondary small">Letzte 24 h</button>
+      <label class="toggle"><input type="checkbox" id="logHideNoise" checked> Status-Abfragen ausblenden</label>
+    </div>
+    <div id="appLog" class="small" style="max-height:300px;overflow:auto;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="appLogRefresh" class="secondary">Aktualisieren</button>
+      <button id="appLogDownload" class="secondary">Herunterladen</button>
+    </div>
+    <p class="muted small">Die letzten Zeilen der tatsächlichen Programmausgabe (nicht der Update-Ablauf oben) –
+      funktioniert auch, wenn das Hauptprogramm abgestürzt oder nicht erreichbar ist. Ohne Zeitraum: die letzten
+      300 Zeilen; mit „Von“/„Bis“ alle Zeilen in dem Fenster (bis 20000 – reicht für einen ganzen Tag).</p>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const short = c => c ? c.slice(0, 7) : '–';
+const LABEL = {running: 'läuft', unresponsive: 'läuft, antwortet nicht', stopped: 'gestoppt', unknown: '…'};
+let status = null;
+let wasBusy = false;
+
+function ago(ts) {
+  if (!ts) return 'nie';
+  const s = Date.now() / 1000 - ts;
+  if (s < 90) return 'gerade eben';
+  if (s < 3600) return `vor ${Math.round(s / 60)} min`;
+  if (s < 86400) return `vor ${Math.round(s / 3600)} h`;
+  return `vor ${Math.round(s / 86400)} Tagen`;
+}
+
+function headers() {
+  const h = {'Content-Type': 'application/json', 'X-Watchdog': '1'};
+  const t = sessionStorage.getItem('wd-token');
+  if (t) h['X-Token'] = t;
+  return h;
+}
+
+async function act(name, body) {
+  try {
+    const r = await fetch(`/api/${name}`, {method: 'POST', headers: headers(), body: JSON.stringify(body || {})});
+    if (r.status === 401) { $('result').innerHTML = '<span class="err">Token fehlt oder ist falsch.</span>'; $('tokenCard').hidden = false; return; }
+    if (!r.ok) { $('result').innerHTML = `<span class="err">${esc((await r.json()).error)}</span>`; return; }
+    refresh();
+  } catch (e) { $('result').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('#maintCard button'); if (!b) return;
+  if (b.id === 'maintEnd') act('maintenance-end'); else act('maintenance', {minutes: Number(b.dataset.m)});
+});
+
+function renderSystem(s) {
+  const y = s.system, b = s.backup;
+  $('sysCard').hidden = !y && !b;
+  if (!y && !b) return;
+  const t = ts => ts ? new Date(ts * 1000).toLocaleString() : '–';
+  const rows = [];
+  if (y) {
+    if (y.disk) rows.push(['Speicher', `${y.disk.free_mb} MB frei (${y.disk.used_pct} % belegt)`]);
+    if (y.app_db_mb != null) rows.push(['Datenbank', `${y.app_db_mb} MB`]);
+    if (y.temp_c != null) rows.push(['Prozessor', `${y.temp_c} °C`]);
+    if (y.power) {
+      const pe = y.power_events;
+      let txt = y.power.undervolt_now ? 'Unterspannung jetzt'
+        : (pe && pe.count_7d) ? 'jetzt in Ordnung' : y.power.undervolt_ever ? 'Unterspannung seit Start' : 'in Ordnung';
+      if (pe && pe.count_24h) txt += ` · ${pe.count_24h}× Unterspannung in 24 h` + (pe.count_7d > pe.count_24h ? ` (${pe.count_7d}× in 7 Tagen)` : '')
+        + (pe.longest_s_24h != null ? `, längster ${pe.longest_s_24h} s` : '');
+      else if (pe && pe.count_7d) txt += ` · ${pe.count_7d}× Unterspannung in 7 Tagen, keine in den letzten 24 h`;
+      if (pe && pe.send_known_24h) txt += ` · ${pe.send_near_24h} von ${pe.send_known_24h} kurz nach einer Sendung des Nodes`;
+      rows.push(['Strom', txt]);
+    }
+    if (y.time_synced != null) rows.push(['Uhrzeit', y.time_synced ? 'abgeglichen' : 'NICHT abgeglichen']);
+    rows.push(['Internet', y.internet.up ? 'erreichbar' : 'nicht erreichbar']);
+    if (y.tailscale) rows.push(['Tailscale', y.tailscale.state]);
+  }
+  if (b) rows.push(['Sicherung', b.last_ok ? `zuletzt ${t(b.last_ok)} (${b.files.length} Dateien)` : 'noch keine']);
+  $('sysInfo').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  const pr = (y && y.power_events && y.power_events.recent) || [];
+  const dur = e => e.kind === 'missed' ? 'kurz, zwischen zwei Messungen verpasst'
+    : e.end == null ? 'dauert an' : e.lost ? 'Ende unbekannt (Neustart?)' : `${e.duration_s} s`;
+  const sendTxt = e => e.sends_near == null ? (e.sends_error ? 'Sendezeiten nicht abrufbar' : '')
+    : e.sends_near.length ? 'Sendung ' + e.sends_near.map(x => `${x.kind} ${x.dt <= 0 ? Math.abs(x.dt) + ' s davor' : x.dt + ' s danach'}`).join(', ')
+    : 'keine Sendung in der Nähe';
+  $('powerOut').innerHTML = pr.length
+    ? `<strong>Letzte Unterspannungen</strong> <span class="muted">(Messung alle ${y.power_events.sample_s} s)</span>`
+      + pr.map(e => `<div>${esc(t(e.start))} · ${esc(dur(e))}${e.throttled ? ' · Pi gedrosselt' : ''}`
+        + (sendTxt(e) ? `<br><span class="muted">${esc(sendTxt(e))}</span>` : '') + '</div>').join('')
+    : '';
+  const out = (y && y.internet.outages || []).slice(-5).reverse();
+  $('netOut').innerHTML = out.length
+    ? '<strong>Letzte Netzausfälle</strong>' + out.map(o => o.clock_jump
+        ? `<div>beendet ${esc(t(o.end))} · ${o.duration_s != null ? 'Dauer ca. ' + esc(Math.round(o.duration_s)) + ' s' : 'Beginn und Dauer unbekannt'}`
+          + `<br><span class="muted">Die Uhr des Rechners wurde währenddessen korrigiert, die Zeiten sind ungenau.</span></div>`
+        : `<div>${esc(t(o.start))} – ${o.end ? esc(t(o.end)) : 'dauert an'}</div>`).join('')
+    : '';
+  if (b) $('netOut').innerHTML += (b.notes || []).map(n => `<div class="muted">${esc(n)}</div>`).join('');
+}
+
+function render(s) {
+  status = s;
+  $('pill').className = 'pill ' + s.app;
+  $('pill').textContent = LABEL[s.app] || s.app;
+  $('appLink').hidden = !s.app_url;
+  if (s.app_url) $('appLink').href = s.app_url;
+  $('tokenCard').hidden = !(s.needs_token && !sessionStorage.getItem('wd-token'));
+  const rows = [
+    ['Stand', s.commit ? `${short(s.commit)} (${esc(s.current_branch || s.branch)})` : '–'],
+    ['Letzter guter Stand', short(s.last_good)],
+    ['Verwaltung', `${s.manager}`],
+    ['Projekt', s.repo_dir],
+    ['Watchdog', 'v' + s.version],
+  ];
+  $('info').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${k === 'Stand' ? v : esc(v)}</dd>`).join('');
+  const us = s.usb;
+  $('usbInfo').innerHTML = !us ? '' : (us.devices.length
+    ? us.devices.map(d => `<div class="ok">● ${esc(d.name || d.path)} <span class="muted small">${esc(d.path)}${d.readable ? '' : ' · kein Zugriff'}</span></div>`).join('')
+    : `<div class="${us.expect ? 'err' : 'muted'}">○ kein USB-Gerät erkannt${us.missing_since ? ' (seit ' + new Date(us.missing_since * 1000).toLocaleTimeString() + ')' : ''}</div>`)
+    + (us.notes || []).map(n => `<div class="muted small">${esc(n)}</div>`).join('');
+  $('usbCard').hidden = !us;
+  const mt = s.maintenance;
+  $('maintCard').hidden = !mt;
+  if (mt) {
+    $('maintInfo').innerHTML = mt.active ? `Wartung läuft noch ${Math.ceil(mt.remaining_s / 60)} min (${mt.source === 'app' ? 'im Hauptprogramm gestartet' : 'hier gestartet'}).` : 'Keine Wartung aktiv.';
+    if (mt.active || mt.app_error) $('maintInfo').innerHTML += mt.app_synced === true ? ' <span class="ok">Hauptprogramm benachrichtigt.</span>'
+      : mt.app_error ? ` <span class="${mt.app_synced === false ? 'err' : 'muted'}">${esc(mt.app_error)}</span>` : '';
+    $('maintEnd').hidden = !mt.active;
+  }
+  renderSystem(s);
+  const warn = [];
+  (s.problems || []).forEach(p => warn.push(p));
+  if (s.git_error) warn.push('Git-Problem: ' + s.git_error);
+  if (s.dirty) warn.push('Im Projekt gibt es lokale Änderungen – Updates werden verweigert.');
+  if (s.blocked) warn.push(`Stand ${short(s.blocked)} ist als fehlerhaft markiert und wird nicht automatisch erneut versucht.`);
+  $('warnings').innerHTML = warn.map(esc).join('<br>');
+
+  const u = s.update_info;
+  if (u) {
+    const list = (u.subjects || []).map(x => `<li>${esc(x)}</li>`).join('');
+    $('updateInfo').innerHTML = (u.behind ? `<strong>${u.behind} neue Änderung(en)</strong>` : 'Aktuell')
+      + ` <span class="muted small">· geprüft ${esc(ago(u.checked_at))}</span>` + (list ? `<ul>${list}</ul>` : '');
+  }
+  else $('updateInfo').innerHTML = '<span class="muted">Noch nicht geprüft.</span>';
+  $('force').hidden = !s.blocked;
+
+  const j = s.job, busy = j.running;
+  document.querySelectorAll('button[id]').forEach(b => { if (b.id !== 'tokenSave') b.disabled = busy; });
+  $('result').innerHTML = busy ? `<span class="muted">Läuft: ${esc(j.name)} …</span>`
+    : (j.message ? `<span class="${j.ok ? 'ok' : 'err'}">${esc(j.message)}</span>` : '<span class="muted">Noch keine Aktion seit dem Start.</span>');
+  $('log').innerHTML = (j.log || []).map(l =>
+    `<div><span class="t">${new Date(l.ts * 1000).toLocaleTimeString()}</span> ${esc(l.text)}</div>`).join('');
+  $('log').scrollTop = $('log').scrollHeight;
+  if (wasBusy && !busy) loadRuns();          // ein Lauf ist gerade fertig geworden: Liste nachziehen
+  wasBusy = busy;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    try { render(data); }
+    catch (e) { $('warnings').textContent = 'Anzeigefehler: ' + e.message; }      // Seite bleibt bedienbar
+  } catch { $('pill').className = 'pill stopped'; $('pill').textContent = 'Watchdog nicht erreichbar'; }
+  clearTimeout(refresh.t);
+  refresh.t = setTimeout(refresh, status && status.job.running ? 1000 : 4000);
+}
+
+$('check').onclick = () => act('check');
+$('update').onclick = () => act('update');
+$('force').onclick = () => { if (confirm('Den als fehlerhaft markierten Stand wirklich erneut einspielen?')) act('update', {force: true}); };
+$('restart').onclick = () => act('restart');
+$('start').onclick = () => act('start');
+$('stop').onclick = () => { if (confirm('Das Programm wirklich stoppen? Es ist dann nicht mehr erreichbar, bis du es startest.')) act('stop'); };
+$('rollback').onclick = () => { if (confirm('Auf den letzten funktionierenden Stand zurücksetzen?')) act('rollback'); };
+$('tokenSave').onclick = () => { sessionStorage.setItem('wd-token', $('token').value); $('token').value = ''; $('tokenCard').hidden = true; };
+refresh();
+
+// Betriebszeit als "2 T 5 h" / "5 h 20 min" / "12 min" statt roher Sekunden.
+function fmtElapsed(s) {
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d} T ${h} h`;
+  if (h > 0) return `${h} h ${m} min`;
+  return `${m} min`;
+}
+
+const CHART_W = 600, MARGIN_L = 30, TEMP_H = 88, UV_TOP = 98, UV_H = 18;   // links Platz für die Temperatur-Legende, dann Temperatur, Unterspannungs-Signal, x-Achse
+let histSamples = [], histT0 = 0, histSpan = 1;
+
+function renderHistory(samples, bootTs) {
+  if (samples.length < 2) { $('histCard').hidden = true; return; }
+  const temps = samples.map(s => s.temp_c).filter(t => t != null && isFinite(t));
+  if (temps.length < 2) { $('histCard').hidden = true; return; }
+  $('histCard').hidden = false;
+  const min = Math.min(...temps), max = Math.max(...temps);
+  const pad = (max - min) < 1 ? 1 : (max - min) * 0.1;
+  const lo = min - pad, hi = max + pad, n = samples.length;
+  // x-Achse = Zeit seit dem Start des Rechners (nicht die Probe-Nummer): so rutscht nichts aus der Anzeige,
+  // solange der Pi läuft - der Server liefert ohnehin schon den ganzen Zeitraum, nur verdichtet.
+  const t0 = bootTs || samples[0].ts, t1 = samples[n - 1].ts;
+  histT0 = t0; histSpan = Math.max(1, t1 - t0);
+  const plotW = CHART_W - MARGIN_L;
+  const x = ts => MARGIN_L + Math.max(0, Math.min(plotW, ((ts - t0) / histSpan) * plotW));
+  const y = v => TEMP_H - ((v - lo) / (hi - lo)) * TEMP_H;
+  // Temperatur-Legende links: 3 Marken mit gestrichelter Hilfslinie, damit man ungefähr sieht, wo man ist.
+  let yAxis = '';
+  for (let i = 0; i <= 2; i++) {
+    const v = lo + (hi - lo) * i / 2, yy = y(v);
+    yAxis += `<line x1="${MARGIN_L}" y1="${yy.toFixed(1)}" x2="${CHART_W}" y2="${yy.toFixed(1)}" stroke="var(--line)" stroke-width="1" stroke-dasharray="2,3"/>` +
+      `<text x="${MARGIN_L - 4}" y="${(yy + 3).toFixed(1)}" font-size="9" fill="var(--muted)" text-anchor="end">${Math.round(v)}°</text>`;
+  }
+  let path = '';
+  samples.forEach(s => {
+    if (s.temp_c == null || !isFinite(s.temp_c)) return;
+    path += (path ? 'L' : 'M') + x(s.ts).toFixed(1) + ',' + y(s.temp_c).toFixed(1) + ' ';
+  });
+  // Rechtecksignal (0/1) für Unterspannung: Wert gilt bis zur nächsten Probe, wie bei einem Oszilloskop.
+  const uvY = on => UV_TOP + (on ? 0 : UV_H);
+  let uvPath = '', prevY = null;
+  samples.forEach(s => {
+    const on = !!s.undervolt_now, xi = x(s.ts), yy = uvY(on);
+    if (prevY === null) uvPath = `M${xi.toFixed(1)},${yy}`;
+    else uvPath += ` L${xi.toFixed(1)},${prevY.toFixed(1)} L${xi.toFixed(1)},${yy.toFixed(1)}`;
+    prevY = yy;
+  });
+  uvPath += ` L${CHART_W},${prevY.toFixed(1)}`;
+  const TICKS = 5, axisY = UV_TOP + UV_H;
+  let axis = `<line x1="${MARGIN_L}" y1="${UV_TOP}" x2="${CHART_W}" y2="${UV_TOP}" stroke="var(--line)" stroke-width="1"/>`;
+  for (let i = 0; i <= TICKS; i++) {
+    const xi = MARGIN_L + (i / TICKS) * plotW, anchor = i === 0 ? 'start' : i === TICKS ? 'end' : 'middle';
+    axis += `<line x1="${xi.toFixed(1)}" y1="${axisY}" x2="${xi.toFixed(1)}" y2="${axisY + 4}" stroke="var(--muted)" stroke-width="1"/>` +
+      `<text x="${Math.min(CHART_W - 2, Math.max(MARGIN_L + 2, xi)).toFixed(1)}" y="${axisY + 13}" font-size="9" fill="var(--muted)" text-anchor="${anchor}">${esc(fmtElapsed(i / TICKS * histSpan))}</text>`;
+  }
+  $('histChart').innerHTML = yAxis + axis +
+    `<path d="${uvPath}" fill="none" stroke="var(--bad)" stroke-width="2"/>` +
+    `<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
+  histSamples = samples;
+  renderHistSummary();
+}
+function renderHistSummary() {
+  const n = histSamples.length;
+  if (!n) return;
+  const t = ts => new Date(ts * 1000).toLocaleTimeString();
+  const temps = histSamples.map(s => s.temp_c).filter(v => v != null && isFinite(v));
+  const uv = histSamples.filter(s => s.undervolt_now).length;
+  $('histInfo').textContent = `Betriebszeit ${fmtElapsed(histSpan)} (${t(histSamples[0].ts)} – ${t(histSamples[n - 1].ts)})`
+    + (temps.length ? ` · Temperatur ${Math.min(...temps).toFixed(1)}–${Math.max(...temps).toFixed(1)} °C` : '')
+    + ` · unten: Unterspannung ${uv ? `(${uv}× erkannt, rot = an)` : '(nie erkannt seit dem Start)'}`;
+}
+
+// Mauszeiger über dem Diagramm: genauen Zeitpunkt + Wert statt nur der Gesamtübersicht zeigen.
+// Die Probe mit der x-Position (Zeit) findet man am besten über die Zeit, nicht über den Index: die Punkte
+// liegen auf der x-Achse nach Zeit, nicht mehr gleichmäßig nach ihrer Nummer.
+$('histChart').addEventListener('pointermove', e => {
+  if (histSamples.length < 2) return;
+  const rect = $('histChart').getBoundingClientRect();
+  const relPx = (e.clientX - rect.left) / rect.width * CHART_W;         // in Diagramm-Einheiten (viewBox)
+  const rel = Math.max(0, Math.min(1, (relPx - MARGIN_L) / (CHART_W - MARGIN_L)));
+  const targetTs = histT0 + rel * histSpan;
+  let best = histSamples[0], bestDiff = Infinity;
+  for (const s of histSamples) {
+    const diff = Math.abs(s.ts - targetTs);
+    if (diff < bestDiff) { bestDiff = diff; best = s; }
+  }
+  const temp = best.temp_c != null ? `${best.temp_c.toFixed(1)} °C` : 'keine Temperaturmessung';
+  $('histInfo').textContent = `${new Date(best.ts * 1000).toLocaleString()} · ${fmtElapsed(best.ts - histT0)} nach dem Start · ${temp} · `
+    + (best.undervolt_now ? 'Unterspannung: AN' : 'Unterspannung: aus');
+});
+$('histChart').addEventListener('pointerleave', renderHistSummary);
+
+async function refreshMetrics() {
+  try {
+    const r = await fetch('/api/metrics?limit=200', {headers: headers()});
+    const data = await r.json();
+    renderHistory(data.samples || [], data.boot_ts);
+  } catch { /* egal, nächster Versuch kommt */ }
+  setTimeout(refreshMetrics, 30000);
+}
+refreshMetrics();
+
+const LOG_NOISE = /"GET \/api\/(status|usb|channels\/unread|peers|maintenance|version) HTTP/;
+async function loadAppLog() {
+  const since = $('logSince').value.replace('T', ' '), until = $('logUntil').value.replace('T', ' ');
+  const qs = new URLSearchParams({lines: (since || until) ? '20000' : '300'});
+  if (since) qs.set('since', since);
+  if (until) qs.set('until', until);
+  try {
+    const r = await fetch(`/api/log?${qs}`, {headers: headers()});
+    const data = await r.json();
+    let lines = data.lines || [];
+    if ($('logHideNoise').checked) lines = lines.filter(l => !LOG_NOISE.test(l));
+    $('appLog').textContent = lines.join('\n') || '(leer in diesem Zeitraum)';
+  } catch (e) { $('appLog').textContent = 'Nicht abrufbar: ' + e.message; }
+}
+$('appLogRefresh').onclick = loadAppLog;
+$('logSince').onchange = loadAppLog;
+$('logUntil').onchange = loadAppLog;
+$('logHideNoise').onchange = loadAppLog;
+const toLocalInput = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+function setLogRange(hoursBack) {
+  const now = new Date();
+  $('logUntil').value = toLocalInput(now);
+  $('logSince').value = toLocalInput(new Date(now.getTime() - hoursBack * 3600 * 1000));
+}
+$('logLast24h').onclick = () => { setLogRange(24); loadAppLog(); };
+$('appLogDownload').onclick = () => {
+  const blob = new Blob([$('appLog').textContent], {type: 'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `meshcore-remote-log-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+setLogRange(1);           // Vorgabe beim Öffnen: letzte Stunde
+loadAppLog();
+
+async function loadRuns() {
+  try {
+    const r = await fetch('/api/runs?limit=50', {headers: headers()});
+    const data = await r.json();
+    const jobs = data.jobs || [];
+    $('runList').innerHTML = jobs.length ? jobs.map(j => {
+      const mark = j.ok === false ? '✗' : j.ok === true ? '✓' : '…';
+      const cls = j.ok === false ? 'err' : j.ok === true ? 'ok' : 'muted';
+      return `<div data-run="${j.id}" style="cursor:pointer;padding:3px 0;border-bottom:1px solid var(--line)">
+        <span class="${cls}">${mark}</span> ${new Date(j.started * 1000).toLocaleString()} ·
+        <span class="muted">${esc(j.name)}</span>${j.message ? ` · <span class="muted small">${esc(j.message)}</span>` : ''}
+      </div>`;
+    }).join('') : '<span class="muted">Noch keine vergangenen Läufe gespeichert.</span>';
+  } catch { $('runList').innerHTML = '<span class="muted">Nicht abrufbar.</span>'; }
+}
+$('runList').onclick = async e => {
+  const row = e.target.closest('[data-run]');
+  if (!row) return;
+  try {
+    const r = await fetch(`/api/runs/${row.dataset.run}`, {headers: headers()});
+    const data = await r.json();
+    $('runLog').style.display = '';
+    $('runLog').innerHTML = (data.lines || []).map(l =>
+      `<div><span class="t">${new Date(l.ts * 1000).toLocaleTimeString()}</span> ${esc(l.text)}</div>`).join('')
+      || '<span class="muted">Keine Zeilen gespeichert.</span>';
+  } catch (e) { $('runLog').textContent = 'Nicht abrufbar: ' + e.message; }
+};
+loadRuns();
+</script>
+</body>
+</html>

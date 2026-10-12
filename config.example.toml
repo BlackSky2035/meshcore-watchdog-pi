@@ -1,0 +1,36 @@
+# Kopieren nach config.toml und anpassen. Umgebungsvariablen WD_<NAME> haben Vorrang.
+
+[program]
+repo_dir = "/home/pi/meshcore-remote"      # Git-Klon des Hauptprogramms (Pflicht)
+remote = "origin"
+branch = "main"
+manager = "auto"                           # auto | process (ohne systemd, nur Tests) | systemd (Pi)
+service_name = "meshcore-remote"
+systemctl_command = "systemctl"            # auf dem Pi: "sudo systemctl" (siehe deploy/sudoers.example)
+start_command = "venv/bin/python -m app.main"   # nur process-Manager, relativ zu repo_dir
+health_url = "http://127.0.0.1:8000/api/version"
+health_timeout_s = 45
+stable_s = 5
+install_command = "venv/bin/python -m pip install -r requirements.txt"
+autostart_app = false                      # Programm beim Start des Watchdogs starten
+expect_internet = false                    # true: fehlendes Internet/Tailscale wird als Problem gemeldet (sonst nur Anzeige)
+backup_dir = ""                            # Datenbanksicherung; leer = data/backups
+backup_extra_dir = ""                      # optional zweites Ziel, z. B. "/media/pi/STICK/meshcore"
+backup_keep = 7
+expect_usb = false                         # true: fehlender USB-Node wird oben als Problem gemeldet (sonst nur Anzeige)
+
+[server]
+host = "127.0.0.1"                         # so lassen; Zugriff per `tailscale serve`. "0.0.0.0" nur mit token!
+port = 8100
+token = ""
+
+# Wartungsmodus: Der Watchdog-Schalter gibt den Wunsch an das Hauptprogramm weiter.
+# app_control_token = gleicher Wert wie control_token in dessen config.toml (leer = Hauptprogramm wird nicht benachrichtigt).
+# app_url = nur nötig, wenn das Hauptprogramm nicht unter der Adresse aus health_url erreichbar ist.
+# app_control_token = ""
+# app_url = ""
+
+# Adresse für den Link "Hauptprogramm ↗" in der Watchdog-Oberfläche (reine Anzeige, für nichts anderes benutzt).
+# Leer = wie app_url/health_url, also meist 127.0.0.1 – im Browser auf einem anderen Gerät falsch!
+# Bei Zugriff über Tailscale hier die https-Adresse eintragen, z. B. "https://<hostname>.<tailnet>.ts.net".
+# app_link_url = ""
