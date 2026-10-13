@@ -69,6 +69,7 @@
     <h2>Programm</h2>
     <dl id="info"></dl>
     <p id="warnings" class="warn small"></p>
+    <p id="hints" class="muted small"></p>
   </section>
 
   <section class="card" id="sysCard" hidden>
@@ -219,7 +220,8 @@ function renderSystem(s) {
   $('sysInfo').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
   const pr = (y && y.power_events && y.power_events.recent) || [];
   const dur = e => e.kind === 'missed' ? 'kurz, zwischen zwei Messungen verpasst'
-    : e.end == null ? 'dauert an' : e.lost ? 'Ende unbekannt (Neustart?)' : `${e.duration_s} s`;
+    : e.end == null ? 'dauert an' : e.lost ? 'Ende unbekannt (Neustart?)'
+    : e.duration_s == null ? 'Dauer unbekannt (Uhr gesprungen)' : `${e.duration_s} s${e.clock_jump ? ' (Uhr gesprungen, aus Laufzeit)' : ''}`;
   const sendTxt = e => e.sends_near == null ? (e.sends_error ? 'Sendezeiten nicht abrufbar' : '')
     : e.sends_near.length ? 'Sendung ' + e.sends_near.map(x => `${x.kind} ${x.dt <= 0 ? Math.abs(x.dt) + ' s davor' : x.dt + ' s danach'}`).join(', ')
     : 'keine Sendung in der Nähe';
@@ -248,6 +250,7 @@ function render(s) {
   const rows = [
     ['Stand', s.commit ? `${short(s.commit)} (${esc(s.current_branch || s.branch)})` : '–'],
     ['Letzter guter Stand', short(s.last_good)],
+    ...(s.previous_good ? [['Guter Stand davor', short(s.previous_good)]] : []),
     ['Verwaltung', `${s.manager}`],
     ['Projekt', s.repo_dir],
     ['Watchdog', 'v' + s.version],
@@ -274,6 +277,9 @@ function render(s) {
   if (s.dirty) warn.push('Im Projekt gibt es lokale Änderungen – Updates werden verweigert.');
   if (s.blocked) warn.push(`Stand ${short(s.blocked)} ist als fehlerhaft markiert und wird nicht automatisch erneut versucht.`);
   $('warnings').innerHTML = warn.map(esc).join('<br>');
+  const hints = (s.hints || []).slice();
+  if (s.pending) hints.push('Ein Update läuft gerade oder wurde unterbrochen (wird beim nächsten Start des Watchdogs zurückgesetzt).');
+  $('hints').innerHTML = hints.map(h => 'Hinweis: ' + esc(h)).join('<br>');
 
   const u = s.update_info;
   if (u) {
@@ -429,6 +435,7 @@ async function loadAppLog() {
   try {
     const r = await fetch(`/api/log?${qs}`, {headers: headers()});
     const data = await r.json();
+    if (!r.ok) { $('appLog').textContent = data.error || ('Fehler ' + r.status); return; }   // z. B. 429: Protokoll wird gerade geladen
     let lines = data.lines || [];
     if ($('logHideNoise').checked) lines = lines.filter(l => !LOG_NOISE.test(l));
     $('appLog').textContent = lines.join('\n') || '(leer in diesem Zeitraum)';

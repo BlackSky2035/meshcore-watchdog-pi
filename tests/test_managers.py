@@ -126,3 +126,51 @@ def test_make_manager_explicit(tmp_path):
     assert make_manager(Config(manager="systemd")).name == "systemd"
     with pytest.raises(ManagerError):
         make_manager(Config(manager="quatsch"))
+
+
+def test_systemd_stop_waits_longer_than_the_unit_stop_timeout(tmp_path):
+    """systemctl stop darf nicht vor dem Ablauf von TimeoutStopSec abgebrochen werden (sonst: Fehler, aber Dienst wird später doch beendet)."""
+    script = tmp_path / "systemctl"
+    script.write_text("#!/bin/sh\n[ \"$1\" = stop ] && sleep 1.5\nexit 0\n")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    m = SystemdManager("meshcore-remote", str(script), timeout=1)
+    m.stop(5)                                            # 1,5 s Stoppzeit < 5 s erlaubte Stoppzeit: kein Fehler
+
+
+def test_systemd_tail_has_short_timeout_and_keeps_partial_output(tmp_path, monkeypatch):
+    import time
+    script = tmp_path / "journalctl"
+    script.write_text("#!/bin/sh\necho 'erste Zeile'\nsleep 20\n")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+    m = SystemdManager("meshcore-remote")
+    t0 = time.monotonic()
+    lines = m.tail(10, since="1 day ago")
+    assert time.monotonic() - t0 < 8
+    assert lines and lines[0] == "erste Zeile"
+
+
+def _sleeper():
+    import subprocess
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+
+
+def test_process_manager_ignores_reused_pid_from_old_pidfile(tmp_path):
+    """Nach einem Neustart des Rechners kann die PID aus app.pid zu einem fremden Prozess gehören: nie als App behandeln, nie beenden."""
+    foreign = _sleeper()
+    try:
+        d = tmp_path / "d"
+        d.mkdir()
+        (d / "app.pid").write_text(f"{foreign.pid} 1")              # Startzeit passt nicht
+        m = ProcessManager(f"{sys.executable} -m app.main", str(tmp_path), str(d))
+        assert not m.is_active()
+        m.stop(1)
+        assert foreign.poll() is None                               # fremder Prozess lebt noch
+        (d / "app.pid").write_text(f"{foreign.pid}")                # altes Format ohne Startzeit, fremde Kommandozeile
+        m2 = ProcessManager(f"{sys.executable} -m app.main", str(tmp_path), str(d))
+        assert not m2.is_active()
+        m2.stop(1)
+        assert foreign.poll() is None
+    finally:
+        foreign.kill()
+        foreign.wait()

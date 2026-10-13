@@ -8,12 +8,16 @@ Schutz der ändernden Aktionen:
   ohne Vorabprüfung (CORS), die wir nie bestätigen: blockiert Fremdaufrufe aus dem Browser.
 - Optional `token`: dann muss zusätzlich `X-Token` stimmen. Empfohlen, sobald die Seite
   über das lokale Netz oder Tailscale erreichbar ist.
+- Host-Prüfung (DNS-Rebinding): ändernde Aufrufe nur mit bekanntem `Host` (IP-Adresse, localhost,
+  *.ts.net, Rechnername[.local], `allowed_hosts`). Lesen (GET) bleibt offen.
 """
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import logging
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +35,43 @@ MAX_BODY = 4096
 SOCKET_TIMEOUT_S = 15.0     # hängende Verbindungen blockieren keinen Thread dauerhaft
 MAX_CONNECTIONS = 48       # darüber: 503 statt unbegrenzt Threads
 STARTED = time.time()
+LOG_SLOT = threading.BoundedSemaphore(1)   # höchstens EIN Protokollabruf (journalctl) gleichzeitig
+
+
+def _host_name(header: str | None) -> str:
+    """Host-Header ohne Port, klein geschrieben ("[::1]:8100" → "::1")."""
+    h = (header or "").strip().lower()
+    if h.startswith("["):
+        return h[1:].split("]", 1)[0]
+    if h.count(":") == 1:
+        h = h.split(":", 1)[0]
+    return h.rstrip(".")
+
+
+def host_allowed(header: str | None, extra=()) -> bool:
+    """Darf ein ändernder Aufruf mit diesem Host-Header kommen? IP-Adressen sind kein Weg für DNS-Rebinding (dort steht
+    immer der Name des Angreifers im Host), ebenso wenig ein fehlender Header (kein Browser)."""
+    host = _host_name(header)
+    if not host:
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    if host == "localhost" or host.endswith(".ts.net"):
+        return True
+    try:
+        me = socket.gethostname().lower()
+    except Exception:
+        me = ""
+    if me and host in (me, me + ".local", me.split(".")[0], me.split(".")[0] + ".local"):
+        return True
+    for entry in extra or ():
+        e = str(entry).strip().lower().rstrip(".")
+        if e and (host == e or (e.startswith(".") and host.endswith(e))):
+            return True
+    return False
 
 FALLBACK_PAGE = ("<!doctype html><meta charset=utf-8><title>MeshCore Watchdog</title>"
                  "<h1>MeshCore Watchdog</h1><p>Die Oberfläche (static/index.html) fehlt, der Watchdog läuft aber.</p>"
@@ -101,10 +142,16 @@ def make_handler(cfg: Config, updater, cache=None):
                 except ValueError:
                     n = 100
                 since, until = q.get("since", [""])[0], q.get("until", [""])[0]
+                # journalctl läuft hier im Anfragepfad (kurzes Zeitlimit im Manager): nie mehrere gleichzeitig, sonst belegen
+                # wiederholte Abrufe die Verbindungen des Servers
+                if not LOG_SLOT.acquire(blocking=False):
+                    return self._json(429, {"error": "Protokoll wird gerade geladen – bitte kurz warten"})
                 try:
                     lines = updater.log_tail(n, since=since, until=until)
                 except Exception as e:
                     lines = [f"(Programm-Protokoll nicht lesbar: {e})"]
+                finally:
+                    LOG_SLOT.release()
                 return self._json(200, {"lines": lines})
             if path == "/api/metrics":
                 try:
@@ -153,6 +200,9 @@ def make_handler(cfg: Config, updater, cache=None):
             path = self.path.partition("?")[0]
             if not path.startswith("/api/") or (path[5:] not in ACTIONS and path[5:] not in MAINT_ACTIONS):
                 return self._json(404, {"error": "nicht gefunden"})
+            if not host_allowed(self.headers.get("Host"), getattr(cfg, "allowed_hosts", ())):
+                return self._json(403, {"error": "Unbekannter Host-Name (Schutz vor DNS-Rebinding). "
+                                                 "Eigene Namen in allowed_hosts eintragen."})
             if self.headers.get("X-Watchdog") != "1":
                 return self._json(403, {"error": "Header X-Watchdog: 1 fehlt"})
             if cfg.token and not hmac.compare_digest(self.headers.get("X-Token", ""), cfg.token):

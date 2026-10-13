@@ -64,6 +64,22 @@ def reset_hard(repo: str, commit: str) -> None:
     _run(repo, "reset", "--hard", "--quiet", commit)
 
 
+def untracked_collisions(repo: str, old: str, new: str) -> list[str]:
+    """Nicht nachverfolgte (und nicht ignorierte) Dateien, die ein Fast-Forward von `old` nach `new` überschreiben müsste.
+    Git bricht den Merge dann ab. Ignorierte Dateien überschreibt git ohne Rückfrage, sie zählen nicht."""
+    added = _run(repo, "diff", "--no-renames", "--name-only", "--diff-filter=A", old, new).splitlines()
+    if not added:
+        return []
+    untracked = set(_run(repo, "ls-files", "--others", "--exclude-standard").splitlines())
+    out = []
+    for path in added:
+        parts = path.split("/")
+        parents = ["/".join(parts[:i]) for i in range(1, len(parts))]   # Datei, wo das Update einen Ordner braucht
+        if path in untracked or any(p in untracked for p in parents):
+            out.append(path)
+    return sorted(out)
+
+
 def changed_files(repo: str, old: str, new: str) -> set[str]:
     out = _run(repo, "diff", "--name-only", old, new)
     return set(out.splitlines())

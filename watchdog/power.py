@@ -11,6 +11,10 @@ die Sendezeiten des Hauptprogramms daneben (`sends.py`, Notizen in derselben Dat
 Grenzen: Auch der schnelle Takt kann Einbrüche verpassen, die kürzer als das Intervall sind. Das Merkbit „seit dem Start“ verrät
 zumindest das ERSTE verpasste Ereignis (Art „missed“, ohne Dauer). Gemessen wird nur, was der Pi selbst meldet (`vcgencmd get_throttled`):
 Eine Spannung in Volt gibt es beim Pi 3 nicht. Der Thread läuft nie im Anfragepfad und wirft nie. Nicht an echter Hardware getestet.
+
+Uhr: Der Pi hat keine Echtzeituhr und stellt seine Zeit nach dem Start per Netz. Jeder Eintrag trägt deshalb wie im Netzprotokoll
+(`sysmon.NetLog`) zusätzlich `mono` (Laufzeit seit dem Start) und `boot` (Kennung des Starts); die Dauer eines Einbruchs kommt aus der
+Laufzeit, wenn Beginn und Ende im selben Start liegen. Laufzeiten verschiedener Starts werden nie verglichen.
 """
 from __future__ import annotations
 
@@ -29,27 +33,67 @@ SLOW_PROBE_S = 0.5           # eine Messung, die länger dauert, gilt als „Pi 
 NO_PROBE_RETRY_S = 300.0     # gibt es kein vcgencmd (kein Pi), nur selten nachsehen statt alle paar Sekunden
 MAX_EVENTS = 2000            # Wechsel (je Einbruch zwei), danach weichen die ältesten
 DAY_S = 24 * 3600
+CLOCK_JUMP_S = 10.0          # weichen Wanduhr und Laufzeit stärker ab, ist die Uhr gesprungen (wie sysmon.CLOCK_JUMP_S)
+
+
+def _boot_id() -> str | None:
+    """Kennung des aktuellen Starts (Linux), sonst None. Eigene Kopie, kein Import von sysmon (Zirkelbezug)."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+    except Exception:
+        return None
+
+
+def _duration(on: dict, off: dict) -> tuple[float | None, bool]:
+    """Dauer zwischen zwei Einträgen und ob die Uhr dazwischen gesprungen ist. Laufzeit nur innerhalb desselben Starts."""
+    wall = off["ts"] - on["ts"]
+    mono = None
+    if on.get("boot") and on.get("boot") == off.get("boot"):
+        try:
+            mono = float(off["mono"]) - float(on["mono"])
+            if mono < 0:
+                mono = None
+        except Exception:
+            mono = None
+    jumped = wall < 0 or (mono is not None and abs(wall - mono) > CLOCK_JUMP_S)
+    if mono is not None:
+        return round(mono, 1), jumped
+    return (None if wall < 0 else round(wall, 1)), jumped
 
 
 class PowerWatch:
     def __init__(self, path: str | Path | None, probe: Callable[[], dict | None], interval: float = POWER_INTERVAL_S,
                  clock: Callable[[], float] = time.time, on_event: Callable[[float], None] | None = None,
-                 slow_s: float = SLOW_PROBE_S, max_interval: float = MAX_INTERVAL_S):
+                 slow_s: float = SLOW_PROBE_S, max_interval: float = MAX_INTERVAL_S,
+                 mono: Callable[[], float] | None = None, boot: str | None = None):
         self.path = Path(path) if path else None
         self.probe, self.interval, self._clock, self.on_event = probe, interval, clock, on_event
+        # Laufzeituhr: mit einer Test-Uhr (nicht time.time) dient diese selbst, damit beides zusammenpasst (wie SysWatch)
+        self._mono = mono or (time.monotonic if clock is time.time else clock)
+        self._boot = boot if boot is not None else _boot_id()
         self.base_interval, self.slow_s, self.max_interval = interval, slow_s, max_interval
         self.events: list[dict] = []
         self._load()
         last = next((e for e in reversed(self.events) if e.get("kind") != "note"), None)
         self._on = bool(last and last.get("kind") == "undervolt" and last.get("on"))
         if self._on:                      # beim letzten Mal lief gerade ein Einbruch, dann endete der Prozess (Neustart durch Unterspannung?)
-            self._add({"ts": self._clock(), "kind": "undervolt", "on": False, "lost": True})
+            self._add(self._stamp({"ts": self._clock(), "kind": "undervolt", "on": False, "lost": True}))
             self._on = False
         self._prev_ever: bool | None = None
         self._probe_ok = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def _stamp(self, e: dict) -> dict:
+        """Laufzeit und Start-Kennung an einen Eintrag hängen (für Dauern trotz springender Uhr). Wirft nie."""
+        try:
+            e["mono"] = round(float(self._mono()), 3)
+        except Exception:
+            pass
+        if self._boot:
+            e["boot"] = self._boot
+        return e
 
     # ---- Datei ---------------------------------------------------------------
     def _load(self) -> None:
@@ -103,14 +147,14 @@ class PowerWatch:
             now_on, ever = bool(p.get("undervolt_now")), bool(p.get("undervolt_ever"))
             new_event = False
             if now_on and not self._on:
-                self._add({"ts": now, "kind": "undervolt", "on": True, "raw": p.get("raw"),
-                           "throttled": bool(p.get("throttled_now") or p.get("capped_now"))})
+                self._add(self._stamp({"ts": now, "kind": "undervolt", "on": True, "raw": p.get("raw"),
+                                       "throttled": bool(p.get("throttled_now") or p.get("capped_now"))}))
                 new_event = True
             elif not now_on and self._on:
-                self._add({"ts": now, "kind": "undervolt", "on": False})
+                self._add(self._stamp({"ts": now, "kind": "undervolt", "on": False}))
             elif ever and self._prev_ever is False and not now_on:
                 # Merkbit ist neu gesetzt, aber wir haben nie „an“ gesehen: kurzer Einbruch zwischen zwei Messungen
-                self._add({"ts": now, "kind": "missed", "raw": p.get("raw")})
+                self._add(self._stamp({"ts": now, "kind": "missed", "raw": p.get("raw")}))
                 new_event = True
             self._on, self._prev_ever = now_on, ever
         if new_event and self.on_event:
@@ -129,6 +173,7 @@ class PowerWatch:
         """Einbrüche: {start, end (None = läuft noch), duration_s, lost, kind}. Neueste zuletzt."""
         out: list[dict] = []
         cur: dict | None = None
+        cur_ev: dict | None = None
         notes: dict[float, dict] = {}
         with self._lock:
             events = list(self.events)
@@ -140,12 +185,20 @@ class PowerWatch:
             elif e.get("on"):
                 cur = {"start": e["ts"], "end": None, "duration_s": None, "lost": False, "kind": "undervolt",
                        "throttled": bool(e.get("throttled"))}
+                cur_ev = e
                 out.append(cur)
             elif cur is not None:
                 cur["end"] = e["ts"]
                 cur["lost"] = bool(e.get("lost"))
-                cur["duration_s"] = None if cur["lost"] else round(e["ts"] - cur["start"], 1)
-                cur = None
+                if not cur["lost"]:
+                    try:
+                        dur, jumped = _duration(cur_ev, e)
+                    except Exception:
+                        dur, jumped = None, False
+                    cur["duration_s"] = dur
+                    if jumped:
+                        cur["clock_jump"] = True
+                cur = cur_ev = None
         for ep in out:                                   # Sendungen rund um den Einbruch (None = nicht bekannt/abrufbar)
             n = notes.get(ep["start"])
             ep["sends_near"] = n.get("sends") if n else None

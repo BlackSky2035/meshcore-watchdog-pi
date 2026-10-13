@@ -46,6 +46,7 @@ class DemoUpdater:
         self.base = "9f8e7d6c5b4a"
         self.running = True
         self.last_good = self.base
+        self.previous_good: str | None = None   # letzter guter Stand davor (Ziel von „Zurück“, wenn der aktuelle schon der letzte gute ist)
         self.blocked: str | None = None
         self.update_info: dict | None = None
         self.job = {"running": False, "name": None, "started": None, "finished": None,
@@ -149,6 +150,8 @@ class DemoUpdater:
             return False, f"Update fehlgeschlagen, auf {old[:7]} zurückgesetzt; {target[0][:7]} als fehlerhaft markiert"
         self.running = True
         self._wait("Gesundheitsprüfung: ok")
+        if self.commit != self.last_good:
+            self.previous_good = self.last_good
         self.last_good = self.commit
         self.blocked = None
         self.visible = len(REMOTE)             # jetzt erscheint der fehlerhafte dritte Commit
@@ -173,14 +176,18 @@ class DemoUpdater:
         return True, "Gestoppt"
 
     def op_rollback(self):
+        target = self.last_good
         if self.commit == self.last_good:
-            return False, "Schon auf dem letzten guten Stand"
-        self._wait(f"Setze auf {self.last_good[:7]} zurück …")
-        self.applied = 0 if self.last_good == self.base else \
-            1 + [r[0] for r in REMOTE].index(self.last_good)
+            if not self.previous_good:
+                return False, "Schon auf dem letzten guten Stand"
+            target = self.previous_good
+        self._wait(f"Setze auf {target[:7]} zurück …")
+        self.applied = 0 if target == self.base else \
+            1 + [r[0] for r in REMOTE].index(target)
         self.running = True
         self._wait("Gesundheitsprüfung: ok")
-        return True, f"Zurückgesetzt auf {self.last_good[:7]}"
+        self.last_good, self.previous_good = target, None
+        return True, f"Zurückgesetzt auf {target[:7]}"
 
     # ---- Status ----------------------------------------------------------
     def job_view(self) -> dict:
@@ -196,8 +203,10 @@ class DemoUpdater:
                     "branch": "main", "needs_token": False, "app_url": "http://127.0.0.1:8000",
                     "commit": self.commit, "dirty": False,
                     "current_branch": "main", "app": "running" if self.running else "stopped",
-                    "last_good": self.last_good, "blocked": self.blocked, "update_info": self.update_info,
+                    "last_good": self.last_good, "previous_good": self.previous_good, "blocked": self.blocked,
+                    "update_info": self.update_info, "pending": None,
                     "job": {**self.job, "log": list(self.job["log"][-80:])}, "problems": [],
+                    "hints": ["Demo: kein token gesetzt (im echten Betrieb empfohlen)."],
                     "usb": {"devices": [{"path": "/dev/ttyACM0", "name": "usb-Heltec_V4-demo (Demo)", "readable": True}],
                             "expect": True, "notes": [], "checked": time.time(), "missing_since": None,
                             "last_seen": time.time(), "problem": None},

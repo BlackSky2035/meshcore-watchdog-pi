@@ -5,6 +5,9 @@ schweigt seine USB-Warnung. Der Schalter gibt den Wunsch außerdem an das Hauptp
 `app_control_token`), das dann den Anschluss freigibt und Senden/Meldungen ruhen lässt. Die Weitergabe läuft in einem Hintergrund-Thread
 (nie im Anfragepfad); Erfolg oder Fehler steht in der Anzeige. Wird die Wartung im Hauptprogramm gestartet, übernimmt der Watchdog das über
 `maintenance_until` aus /api/version. Höchstens 24 Stunden. Nicht an echter Hardware getestet.
+
+Nach eigenem Starten/Beenden zählen nur Antworten des Hauptprogramms, die DANACH kamen (`seen_at`, Laufzeituhr), und keine, solange
+die eigene Weitergabe noch unterwegs ist. Sonst schaltete eine veraltete Antwort die gerade beendete Wartung wieder ein.
 """
 from __future__ import annotations
 
@@ -38,6 +41,8 @@ class Maintenance:
         self.app_synced: bool | None = None
         self.app_error = ""
         self._threads: list[threading.Thread] = []
+        self._own_at = float("-inf")               # time.monotonic() des letzten eigenen start()/end()
+        self._syncing = 0                          # laufende Weitergaben an das Hauptprogramm
         self._load()
 
     # ---- Zustand -------------------------------------------------------------
@@ -69,6 +74,7 @@ class Maintenance:
         minutes = max(MIN_MIN, min(int(minutes), MAX_MIN))
         with self._lock:
             self.until, self.source = self._clock() + minutes * 60, "watchdog"
+            self._own_at = time.monotonic()
             self._save()
         self._sync("POST", {"minutes": minutes})
         return self.view()
@@ -76,14 +82,20 @@ class Maintenance:
     def end(self) -> dict:
         with self._lock:
             self.until, self.source = None, "watchdog"
+            self._own_at = time.monotonic()
             self._save()
         self._sync("DELETE", None)
         return self.view()
 
-    def observe(self, app_until) -> None:
-        """Vom Statusthread: übernimmt die Wartung, die im Hauptprogramm gestartet/beendet wurde."""
+    def observe(self, app_until, seen_at: float | None = None) -> None:
+        """Vom Statusthread: übernimmt die Wartung, die im Hauptprogramm gestartet/beendet wurde. `seen_at` = wann (time.monotonic)
+        das Hauptprogramm diesen Wert gemeldet hat; ältere Werte als das letzte eigene Starten/Beenden werden ignoriert."""
         try:
             with self._lock:
+                if self._syncing > 0:
+                    return                           # eigene Änderung ist noch unterwegs: Antworten des Hauptprogramms sind veraltet
+                if seen_at is not None and seen_at <= self._own_at:
+                    return
                 if isinstance(app_until, (int, float)) and app_until > self._clock():
                     if self.until is None or abs(self.until - app_until) > 2:
                         self.until, self.source = float(app_until), "app"
@@ -102,9 +114,24 @@ class Maintenance:
         self.app_synced, self.app_error = None, "wird weitergegeben …"
         t = threading.Thread(target=self._sync_worker, args=(method, body), daemon=True, name="maintenance-sync")
         self._threads.append(t)
-        t.start()
+        with self._lock:
+            self._syncing += 1
+        try:
+            t.start()
+        except Exception as e:
+            with self._lock:
+                self._syncing -= 1
+            self.app_synced, self.app_error = False, f"Weitergabe nicht startbar ({e})"
 
     def _sync_worker(self, method: str, body: dict | None) -> None:
+        try:
+            self._sync_attempts(method, body)
+        finally:
+            with self._lock:
+                self._syncing -= 1
+                self._own_at = time.monotonic()      # erst Antworten nach der Weitergabe zählen
+
+    def _sync_attempts(self, method: str, body: dict | None) -> None:
         err = ""
         for attempt in range(TRIES):
             try:

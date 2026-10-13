@@ -22,7 +22,10 @@ expect_usb = false                         # true: fehlender USB-Node wird oben 
 [server]
 host = "127.0.0.1"                         # so lassen; Zugriff per `tailscale serve`. "0.0.0.0" nur mit token!
 port = 8100
-token = ""
+token = ""                                 # dringend empfohlen, auch hinter `tailscale serve` (sonst kann jeder im Tailnet Aktionen auslösen)
+# Ändernde Aufrufe (POST) nur mit bekanntem Host-Namen (Schutz vor DNS-Rebinding). Immer erlaubt: IP-Adressen, localhost,
+# *.ts.net (Tailscale), der Rechnername und <Rechnername>.local. Weitere Namen hier; ".heim.lan" erlaubt alle Namen, die so enden.
+# allowed_hosts = ["station.heim.lan"]
 
 # Wartungsmodus: Der Watchdog-Schalter gibt den Wunsch an das Hauptprogramm weiter.
 # app_control_token = gleicher Wert wie control_token in dessen config.toml (leer = Hauptprogramm wird nicht benachrichtigt).

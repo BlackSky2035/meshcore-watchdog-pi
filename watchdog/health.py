@@ -83,7 +83,8 @@ class StatusCache:
         try:
             if self.maint is not None:
                 info = getattr(self.updater, "version_info", None)
-                self.maint.observe(info.get("maintenance_until") if isinstance(info, dict) else None)
+                self.maint.observe(info.get("maintenance_until") if isinstance(info, dict) else None,
+                                   seen_at=getattr(self.updater, "version_info_at", None))
         except Exception:
             log.exception("Wartung konnte nicht abgeglichen werden")
         try:
@@ -176,7 +177,7 @@ class FallbackUpdater:
         return {"version": __version__, "manager": "nicht verfügbar", "repo_dir": "", "branch": "",
                 "needs_token": False, "app": "unknown", "app_url": "", "last_good": None, "blocked": None,
                 "update_info": None, "job": self.job_view(),
-                "problems": [f"Notbetrieb: {self.unavailable}"]}
+                "problems": [f"Notbetrieb: {self.unavailable}"], "hints": []}
 
 
 # ---- systemd-Herzschlag ----------------------------------------------------

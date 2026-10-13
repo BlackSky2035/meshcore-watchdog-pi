@@ -20,7 +20,10 @@ Eigenständiges Repo. Verwaltet das Hauptprogramm `meshcore-remote` (anderes Rep
   Grund: Der Watchdog muss laufen, auch wenn das Hauptprogramm samt venv kaputt ist.
 - Nichts automatisch aus GitHub ziehen; Updates nur auf Anforderung (UI/CLI).
 - Vor dem Stoppen immer erst vorprüfen und `git fetch`. Nach jedem Start Gesundheitsprüfung.
-- Fehlgeschlagene Commits als `blocked` merken (kein Wiederholungs-Loop).
+- Fehlgeschlagene Commits als `blocked` merken (kein Wiederholungs-Loop). Erst `_restore(prev)`, dann `blocked` setzen, und nur wenn der neue Stand schon eingespielt war; ein Stopp-Fehler sperrt nichts.
+- Unterbrochenes Update: vor dem Stoppen steht `pending={prev,target,since}` in `data/state.json`; beim nächsten Start stellt der Lauf `recover` den alten Stand her und sperrt das Ziel (höchstens 3 Versuche). `_restore` setzt immer hart zurück (`reset --hard`).
+  Kollisionen mit nicht nachverfolgten Dateien (`gitops.untracked_collisions`) werden VOR dem Stoppen erkannt und abgelehnt. `_set_state` wirft nie.
+- „Zurück auf letzten guten Stand“ nutzt `previous_good`, wenn HEAD schon `last_good` ist. Status hat zusätzlich `previous_good`, `pending`, `hints` (auch `demo.py`).
 - Änderungen an `updater.py` immer mit einem Test in `tests/test_updater.py` absichern
   (echte Git-Repos, siehe `tests/conftest.py`).
 
@@ -31,9 +34,9 @@ Eigenständiges Repo. Verwaltet das Hauptprogramm `meshcore-remote` (anderes Rep
 
 ## Bekannte Grenzen
 - Ein Update startet das Programm danach immer, um es zu prüfen, auch wenn es vorher absichtlich gestoppt war.
-- DNS-Rebinding wird nur durch das Token abgewehrt.
+- DNS-Rebinding: POST nur mit erlaubtem `Host` (IP-Adressen, localhost, `*.ts.net`, Rechnername und `.local`, plus `allowed_hosts`/`WD_ALLOWED_HOSTS`), sonst 403; dazu das Token. Ohne Token steht ein Hinweis in `status.hints`.
 - SystemdManager: automatische Tests nur mit Fake-`systemctl`; im Betrieb auf einem Pi mit systemd genutzt, nicht systematisch geprüft.
-- Beim Prozess-Manager ist ein „adoptierter“ Prozess nur über die PID-Datei bekannt.
+- Beim Prozess-Manager ist ein „adoptierter“ Prozess nur über die PID-Datei bekannt (mit Startzeit aus `/proc`, damit eine wiederverwendete PID nicht als Programm gilt).
 
 - `demo.py` + `--demo`: simulierter Updater für die Oberfläche (kein Git, kein Prozess, kein fcntl; Windows ungetestet). Muss dieselbe `status()`-Form wie `Updater` liefern; `updater.py` darf nicht beim Start des Demo-Modus importiert werden.
 - `logstore.py`: Protokoll in SQLite. **Darf nie werfen oder blockieren** (alles in `_run` gekapselt, `JobRecorder` zusätzlich). Änderungen immer mit Test in `tests/test_logstore.py` (kaputte Datei, nicht anlegbarer Pfad, Verbindung bricht mitten im Betrieb).
@@ -51,6 +54,7 @@ Eigenständiges Repo. Verwaltet das Hauptprogramm `meshcore-remote` (anderes Rep
 - `power.py` (`PowerWatch`): eigener schneller Thread (2 s) nur für die Strom-Flags, Einbrüche mit Beginn/Dauer in `data/power_events.jsonl` (nicht beim Neustart des Pi
   verworfen, anders als `metrics.jsonl`). Läuft nie im Anfragepfad, wirft nie, bekommt die Messung als `probe` von `SysWatch` (kein Import von `sysmon`, sonst Zirkelbezug).
   Kein `vcgencmd` → Wiederholung nur alle 5 min. Tests: `tests/test_power.py`.
+  Einträge tragen `mono`/`boot`; die Dauer kommt im selben Start aus der Laufzeit, bei Uhrsprung `clock_jump: True`. `sends.py` wartet über `time.monotonic()`.
 - `sends.py` (`SendCorrelator`): holt NACH einem Einbruch einmal `GET <app>/api/sends` (Header `X-Control-Token` = `app_control_token`) und legt die Sendungen als Notiz an den Einbruch.
   Last-Regeln (nicht aufweichen): nie im Takt, nur nach einem Einbruch; ≥12 s Wartezeit, ≥30 s Abstand, Einbrüche gebündelt, Zeitlimit 3 s, ≤64 KB, ein Thread, nie im Anfragepfad;
   Fehler einmal als Notiz, keine Wiederholung. Die Messung in `power.py` streckt ihren Takt bei langsamen Aufrufen (bis 10 s). Tests: `tests/test_sends.py`.
@@ -61,11 +65,11 @@ Absicherungen prüfen. Nur pushen, wenn alles unten erfüllt ist; sonst zuerst b
 Das Ergebnis der Prüfung (kurz, Punkt für Punkt) dem Nutzer mitteilen.
 
 **Watchdog (hat Vorrang: Erreichbarkeit ist oberste Priorität)**
-1. Status kommt aus dem `StatusCache`; im Anfragepfad (`server.py`) wird nirgends auf Git, systemctl, Prozesse oder das Netz gewartet.
+1. Status kommt aus dem `StatusCache`; im Anfragepfad (`server.py`) wird nirgends auf Git, systemctl, Prozesse oder das Netz gewartet. Einzige Ausnahme `/api/log` (journalctl): höchstens ein Aufruf gleichzeitig (sonst sofort 429) und 3 s Zeitlimit.
 2. Alle Handler laufen über `_guarded` (Fehler → JSON-500, nie Abbruch); `/api/ping` greift auf nichts zu.
 3. Server-Schleife (`serve`) baut den HTTP-Server nach Absturz/belegtem Port neu auf; Verbindungslimit und Socket-Timeout aktiv.
 4. Notbetrieb (`FallbackUpdater`/`load_config_safe`/`build_updater`): kaputte Konfiguration oder Manager stoppen den Server nicht.
-5. Lauf-Sperre wird immer frei (`_finish`, `MAX_JOB_S`); `status()` fängt Abschnitte einzeln ab.
+5. Lauf-Sperre wird immer frei (`_finish`, `MAX_JOB_S` über die monotone Uhr; Laufnummer `_gen`, ein freigegebener alter Lauf berührt den neuen nie); `status()` fängt Abschnitte einzeln ab.
 6. systemd-Herzschlag (`Heartbeat`, `WatchdogSec`, `Restart=always`) unverändert vorhanden.
 7. Protokoll-Datenbank (`logstore.py`) wirft nie und blockiert nie.
 8. Nur Standardbibliothek, keine neue Abhängigkeit.
@@ -87,5 +91,6 @@ Das Ergebnis der Prüfung (kurz, Punkt für Punkt) dem Nutzer mitteilen.
 - `maintenance.py`: eigener Schalter (POST `/api/maintenance` {minutes 5–1440}, POST `/api/maintenance-end`; gleiche Schutzregeln wie die anderen Aktionen: Header `X-Watchdog`, `X-Token`).
   Zustand in `data/maintenance.json`; USB-Warnung schweigt (`UsbWatch.maintenance`). Weitergabe an das Hauptprogramm (POST/DELETE `<app>/api/maintenance`,
   Header `X-Control-Token` = `app_control_token`) läuft in einem Hintergrund-Thread mit 3 Versuchen, nie im Anfragepfad; Ergebnis steht in `snap["maintenance"]`.
-  Umgekehrt übernimmt `StatusCache.refresh` `maintenance_until` aus `/api/version` (`updater.version_info`).
+  Umgekehrt übernimmt `StatusCache.refresh` `maintenance_until` aus `/api/version` (`updater.version_info`); `observe` ignoriert Werte, die älter sind als der eigene letzte Start/Ende oder während die eigene Weitergabe läuft, und `version_info` wird gelöscht, wenn das Hauptprogramm nicht antwortet oder gestoppt ist.
 - Nicht an Hardware getestet: Zusammenspiel mit echtem Hauptprogramm über Tailscale/https.
+- systemd: `deploy/meshcore-remote.service` hat `TimeoutStopSec=20`; `SystemdManager.stop` wartet `stop_timeout_s + 30 s` (mindestens 60 s). Nur mit Fake-`systemctl` getestet.

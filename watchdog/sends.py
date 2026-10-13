@@ -8,6 +8,8 @@ Bewusst sparsam, damit der Pi nicht belastet wird:
 - Höchstens eine Abfrage je `MIN_GAP_S`; Einbrüche in dieser Zeit werden in EINER Abfrage zusammengefasst.
 - Ein Thread, Zeitlimit 3 s, Antwort höchstens 64 KB, nie im Anfragepfad der Weboberfläche. Fehler (Hauptprogramm aus, falsches Token) werden
   einmal je Einbruch als Notiz festgehalten, nicht wiederholt.
+- Wartezeiten und Mindestabstand laufen über die Laufzeituhr (time.monotonic): springt die Wanduhr (Pi ohne Echtzeituhr, Zeit kommt erst
+  per Netz), darf der Thread weder ewig schlafen noch zu früh abfragen.
 Nicht an echter Hardware getestet.
 """
 from __future__ import annotations
@@ -48,14 +50,16 @@ def nearest(sends: list[dict], start: float) -> list[dict]:
 
 class SendCorrelator:
     def __init__(self, base_url: str, token: str, annotate: Callable[[float, list[dict] | None, str | None], None],
-                 clock=time.time, opener=urllib.request.urlopen, settle_s: float = SETTLE_S, min_gap_s: float = MIN_GAP_S):
+                 clock=time.time, opener=urllib.request.urlopen, settle_s: float = SETTLE_S, min_gap_s: float = MIN_GAP_S,
+                 mono=time.monotonic):
         self.base, self.token, self.annotate = base_url, token, annotate
-        self._clock, self._open = clock, opener
+        self._clock, self._open = clock, opener      # `clock` (Wanduhr) nur noch für Kompatibilität; Wartezeiten über `mono`
+        self._mono = mono
         self.settle_s, self.min_gap_s = settle_s, min_gap_s
         self._pending: list[float] = []
         self._lock = threading.Lock()
         self._worker: threading.Thread | None = None
-        self._last_fetch = 0.0
+        self._last_fetch = float("-inf")             # Laufzeituhr der letzten Abfrage
         self.fetches = 0
 
     def request(self, start_ts: float) -> None:
@@ -73,8 +77,8 @@ class SendCorrelator:
     def _run(self) -> None:
         try:
             while True:
-                wait = max(self.settle_s, self.min_gap_s - (self._clock() - self._last_fetch))
-                time.sleep(wait)
+                wait = max(self.settle_s, self.min_gap_s - (self._mono() - self._last_fetch))
+                time.sleep(min(wait, self.settle_s + self.min_gap_s))     # nie länger als nötig, auch bei unerwarteten Werten
                 with self._lock:
                     batch, self._pending = self._pending, []
                     if not batch:                 # Abmelden unter derselben Sperre: ein jetzt eintreffender Einbruch startet einen neuen Thread
@@ -100,7 +104,7 @@ class SendCorrelator:
         return sends
 
     def _process(self, batch: list[float]) -> None:
-        self._last_fetch = self._clock()
+        self._last_fetch = self._mono()
         self.fetches += 1
         try:
             if not self.base:

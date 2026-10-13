@@ -59,3 +59,14 @@ def test_demo_runs_without_fcntl():
             "from watchdog.demo import DemoUpdater; print(DemoUpdater().status()['app'])")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0 and out.stdout.strip() == "running", out.stderr
+
+
+def test_demo_status_has_same_new_keys_and_rollback_to_previous_good(monkeypatch):
+    d = make(monkeypatch)
+    st = d.status()
+    assert "previous_good" in st and isinstance(st["hints"], list)
+    base = st["commit"]
+    assert d.run("update")[0]                       # läuft, soll aber zurück
+    assert d.status()["previous_good"] == base
+    ok, msg = d.run("rollback")
+    assert ok and d.status()["commit"] == base

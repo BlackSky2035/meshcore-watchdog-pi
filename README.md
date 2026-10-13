@@ -21,6 +21,7 @@ Gedacht für den Raspberry Pi (systemd-Modus). Daneben gibt es einen Prozess-Mod
   Update des Hauptprogramms kann den Watchdog deshalb nicht mitreißen.
 - Eigener Port (Standard 8100) mit einer Weboberfläche: Status, Update prüfen/installieren,
   Neustart/Start/Stopp, Rollback, Protokoll.
+- Wird ein Update unterbrochen (Stromausfall, Neustart), stellt der Watchdog beim nächsten Start den alten Stand wieder her. „Zurück auf letzten guten Stand“ geht auch nach einem Update, das zwar läuft, aber unerwünscht ist, auf den Stand davor.
 - **Nichts passiert automatisch.** Updates werden nur auf Knopfdruck (oder per Kommandozeile)
   geholt. Der Pi zieht von selbst nichts von GitHub.
 
@@ -150,6 +151,7 @@ Die ausführliche Checkliste (Passwort im Hauptprogramm, Firewall, SSH, Router, 
 
 - Standard und Empfehlung: nur `127.0.0.1`, davor `tailscale serve` für HTTPS im Tailnet
   (Befehle im README von meshcore-remote-pi, Port 8443 → 8100). So erreicht niemand im LAN/WLAN den Watchdog.
+- Aktionen (POST) nimmt der Watchdog nur an, wenn die Seite über eine IP-Adresse, `localhost`, `*.ts.net` oder den Rechnernamen (auch `.local`) aufgerufen wird (Schutz gegen DNS-Rebinding). Eigene Namen, z. B. aus dem Router, in `allowed_hosts` eintragen. Ein Token empfiehlt sich auch hinter `tailscale serve` (die Oberfläche zeigt sonst einen Hinweis).
 - `host = "0.0.0.0"` nur, wenn es nicht anders geht, und dann **immer** mit `token`
   (Klartext im LAN!). Die Weboberfläche fragt danach und merkt es nur für die Browsersitzung.
 - Ändernde Aktionen verlangen den Header `X-Watchdog: 1` (Schutz vor fremden Webseiten im Browser) und

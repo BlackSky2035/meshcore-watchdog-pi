@@ -253,3 +253,35 @@ def test_warning_without_precise_data_keeps_coarse_fallback(tmp_path):
     w = watch(tmp_path, lambda: 1000.0, lambda: flags(ever=True))
     w.refresh()                                          # nie ein Einbruch aufgezeichnet, aber „seit Start“ gesetzt
     assert "vor Beginn der Aufzeichnung" in " | ".join(w.view()["problems"])
+
+
+def test_duration_uses_monotonic_time_when_the_clock_jumps(tmp_path):
+    """Der Pi stellt seine Uhr nach dem Start per Netz: die Dauer eines Einbruchs darf dadurch nicht um Stunden wachsen."""
+    f = tmp_path / "power_events.jsonl"
+    f.write_text(json.dumps({"ts": 1000.0, "kind": "undervolt", "on": True, "mono": 50.0, "boot": "a"}) + "\n"
+                 + json.dumps({"ts": 1000.0 + 7200 + 4, "kind": "undervolt", "on": False, "mono": 54.0, "boot": "a"}) + "\n",
+                 encoding="utf-8")
+    w = PowerWatch(f, lambda: None, clock=Clock())
+    eps = w.episodes()
+    assert eps[0]["duration_s"] == 4.0 and eps[0].get("clock_jump") is True
+
+
+def test_events_record_mono_and_boot(tmp_path):
+    mono = [10.0]
+    c = Clock()
+    seq = iter([flags(), flags(now=True, ever=True), flags(ever=True)])
+    w = PowerWatch(tmp_path / "p.jsonl", lambda: next(seq), clock=c, mono=lambda: mono[0], boot="b1")
+    w.sample(); c.t += 2; mono[0] += 2
+    w.sample(); c.t -= 3600; mono[0] += 3              # Uhr springt zurück
+    w.sample()
+    on, off = [e for e in w.events if e["kind"] == "undervolt"]
+    assert on["mono"] == 12.0 and on["boot"] == "b1" and off["mono"] == 15.0
+    assert w.episodes()[0]["duration_s"] == 3.0
+
+
+def test_different_boots_never_compare_mono(tmp_path):
+    f = tmp_path / "power_events.jsonl"
+    f.write_text(json.dumps({"ts": 1000.0, "kind": "undervolt", "on": True, "mono": 50.0, "boot": "a"}) + "\n"
+                 + json.dumps({"ts": 1010.0, "kind": "undervolt", "on": False, "mono": 5.0, "boot": "b"}) + "\n", encoding="utf-8")
+    eps = PowerWatch(f, lambda: None, clock=Clock()).episodes()
+    assert eps[0]["duration_s"] == 10.0                # verschiedene Starts: Wanduhr (ohne Sprung erkennbar)

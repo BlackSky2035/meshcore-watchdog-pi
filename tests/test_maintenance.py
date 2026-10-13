@@ -126,3 +126,46 @@ def test_server_endpoints(web2):
     assert json.loads(call(base + "/api/status")[1])["maintenance"]["active"]
     code, body = call(base + "/api/maintenance-end", "POST", H, {})
     assert code == 200 and not json.loads(body)["active"]
+
+
+def test_observe_ignores_app_values_seen_before_own_end(tmp_path):
+    """Wartung im Watchdog beendet, die letzte (veraltete) Antwort des Hauptprogramms meldet sie noch: nicht wieder übernehmen."""
+    now = [1000.0]
+    m = Maintenance(str(tmp_path), clock=lambda: now[0])
+    seen = time.monotonic()
+    m.observe(now[0] + 600, seen_at=seen)
+    assert m.active()
+    time.sleep(0.01)
+    m.end()
+    m.observe(now[0] + 600, seen_at=seen)                     # alte Antwort von vor dem Beenden
+    assert not m.active()
+    m.observe(now[0] + 900, seen_at=time.monotonic())         # neue Antwort: Hauptprogramm hat (neu) Wartung
+    assert m.active()
+
+
+def test_observe_waits_while_own_change_is_being_passed_on(tmp_path):
+    import threading
+    gate = threading.Event()
+
+    def opener(req, timeout):
+        gate.wait(5)
+        return Resp(200)
+    now = [1000.0]
+    m = Maintenance(str(tmp_path), "http://app", "ctl", clock=lambda: now[0], opener=opener, retry_s=0)
+    m.observe(now[0] + 600, seen_at=time.monotonic())
+    m.end()
+    m.observe(now[0] + 600, seen_at=time.monotonic())         # DELETE ist noch unterwegs
+    assert not m.active()
+    gate.set(); m.join()
+
+
+def test_status_cache_passes_version_info_time(tmp_path):
+    now = [1000.0]
+    m = Maintenance(str(tmp_path), clock=lambda: now[0])
+    up = FakeUpdater()
+    up.version_info = {"maintenance_until": now[0] + 600}
+    up.version_info_at = time.monotonic()
+    time.sleep(0.01)
+    m.end()
+    StatusCache(up, maintenance=m).refresh()
+    assert not m.active()

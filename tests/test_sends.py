@@ -285,3 +285,16 @@ def test_syswatch_fetches_sends_after_an_event(tmp_path):
 def test_syswatch_without_app_address_has_no_correlator(tmp_path):
     w = sysmon.SysWatch(str(tmp_path), "", "", probes={"throttled": lambda: None})
     assert w.sends is None and w.power.on_event is None
+
+
+def test_clock_jump_backwards_does_not_make_the_worker_sleep_forever():
+    """Wanduhr springt nach einer Abfrage um Stunden zurück: die Wartezeit wird mit der Laufzeituhr gerechnet."""
+    got = []
+    wall = [2_000_000_000.0]
+    c = SendCorrelator("http://app:8000", "", lambda ts, s, e: got.append(ts), clock=lambda: wall[0],
+                       opener=fake_opener(), settle_s=0.02, min_gap_s=0.1)
+    c.request(1.0)
+    assert until(lambda: len(got) == 1)
+    wall[0] -= 7200                                     # NTP stellt die Uhr zurück
+    c.request(2.0)
+    assert until(lambda: len(got) == 2, timeout=3)

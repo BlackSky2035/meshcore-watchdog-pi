@@ -46,6 +46,9 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 8100
     token: str = ""                            # optional: schützt alle ändernden Aktionen
+    allowed_hosts: tuple = ()                  # zusätzliche Host-Namen für ändernde Aufrufe (Schutz vor DNS-Rebinding);
+                                                # ".heim.lan" = alle Namen, die so enden. Immer erlaubt: IP-Adressen, localhost,
+                                                # *.ts.net, Rechnername und <Rechnername>.local
     data_dir: str = str(ROOT / "data")
 
 

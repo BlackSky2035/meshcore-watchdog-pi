@@ -14,6 +14,9 @@ WorkingDirectory=/home/pi/meshcore-remote
 ExecStart=/home/pi/meshcore-remote/venv/bin/python -m app.main
 Restart=on-failure
 RestartSec=5
+# Spätestens nach 20 s hart beenden. Der Watchdog wartet beim Stoppen länger (stop_timeout_s + 30 s, mindestens 60 s),
+# damit ein Update nie mit „Zeitüberschreitung“ abbricht, während systemd den Dienst gleich darauf doch beendet.
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target

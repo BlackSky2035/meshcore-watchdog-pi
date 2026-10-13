@@ -20,6 +20,28 @@ class ManagerError(Exception):
     pass
 
 
+STOP_MARGIN_S = 30.0        # systemctl stop wartet bis zu TimeoutStopSec der Unit (deploy: 20 s); so viel Luft obendrauf
+LOG_TIMEOUT_S = 3.0         # journalctl im Anfragepfad: kurz halten, Teilausgabe wird trotzdem gezeigt
+
+
+def _proc_starttime(pid: int) -> str | None:
+    """Startzeitpunkt des Prozesses (Feld 22 in /proc/<pid>/stat, Takte seit dem Systemstart) oder None (kein /proc, Prozess weg).
+    Zusammen mit der PID eindeutig: nach einem Neustart kann dieselbe PID zu einem fremden Prozess gehören."""
+    try:
+        data = Path(f"/proc/{pid}/stat").read_text()
+        return data.rsplit(")", 1)[1].split()[19]      # Feld 2 (Name) kann Leerzeichen/Klammern enthalten
+    except (OSError, IndexError):
+        return None
+
+
+def _proc_cmdline(pid: int) -> list[str] | None:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+
+
 class Manager(ABC):
     name = "base"
 
@@ -52,11 +74,43 @@ class ProcessManager(Manager):
         self.logfile = self.data / "app.log"
         self._proc: subprocess.Popen | None = None
 
-    def _pid(self) -> int | None:
+    def _read_pidfile(self) -> tuple[int, str | None] | None:
+        """PID-Datei: „<pid> <startzeit>“ (älteres Format: nur „<pid>“)."""
         try:
-            return int(self.pidfile.read_text().strip())
-        except (OSError, ValueError):
+            parts = self.pidfile.read_text().split()
+            return int(parts[0]), (parts[1] if len(parts) > 1 else None)
+        except (OSError, ValueError, IndexError):
             return None
+
+    def _is_ours(self, pid: int, start: str | None) -> bool:
+        """Gehört `pid` wirklich zu dem Programm, das wir gestartet haben? Ohne /proc (macOS) bleibt nur die PID."""
+        actual = _proc_starttime(pid)
+        if actual is None:
+            return not Path("/proc/self/stat").exists()    # kein /proc: nicht prüfbar, wie bisher vertrauen
+        if start is not None:
+            return actual == start
+        cmd = _proc_cmdline(pid)                           # altes Format ohne Startzeit: Kommandozeile vergleichen
+        if not cmd:
+            return False
+        want = self.parts[1:]
+        return cmd[-len(want):] == want if want else os.path.basename(cmd[0]) == os.path.basename(self.parts[0])
+
+    def _pid(self) -> int | None:
+        entry = self._read_pidfile()
+        if entry is None:
+            return None
+        pid, start = entry
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            self.pidfile.unlink(missing_ok=True)
+            return None
+        except PermissionError:
+            pass
+        if not self._is_ours(pid, start):                  # PID wurde (z. B. nach einem Neustart) neu vergeben
+            self.pidfile.unlink(missing_ok=True)
+            return None
+        return pid
 
     def is_active(self) -> bool:
         if self._proc is not None:
@@ -65,17 +119,7 @@ class ProcessManager(Manager):
             self._proc = None                      # beendet und abgeholt (kein Zombie)
             self.pidfile.unlink(missing_ok=True)
             return False
-        pid = self._pid()                          # vom Watchdog früher gestartet, jetzt "adoptiert"
-        if pid is None:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            self.pidfile.unlink(missing_ok=True)
-            return False
-        except PermissionError:
-            return True
+        return self._pid() is not None             # vom Watchdog früher gestartet, jetzt "adoptiert" (PID + Startzeit geprüft)
 
     def start(self) -> None:
         if self.is_active():
@@ -87,7 +131,12 @@ class ProcessManager(Manager):
                     stdin=subprocess.DEVNULL, start_new_session=True)
         except OSError as e:
             raise ManagerError(f"Start fehlgeschlagen: {e}")
-        self.pidfile.write_text(str(self._proc.pid))
+        pid = self._proc.pid
+        start = _proc_starttime(pid)
+        try:
+            self.pidfile.write_text(f"{pid} {start}" if start else str(pid))
+        except OSError:
+            pass                                   # ohne PID-Datei läuft es trotzdem, nur „adoptieren“ geht dann nicht
 
     def stop(self, timeout: float) -> None:
         pid = self._proc.pid if self._proc else self._pid()
@@ -134,10 +183,10 @@ class SystemdManager(Manager):
         self.cmd = shlex.split(systemctl)
         self.timeout = timeout
 
-    def _run(self, *args: str) -> subprocess.CompletedProcess:
+    def _run(self, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
         try:
             return subprocess.run([*self.cmd, *args, self.service], capture_output=True,
-                                  text=True, timeout=self.timeout)
+                                  text=True, timeout=timeout or self.timeout)
         except subprocess.TimeoutExpired:
             raise ManagerError(f"systemctl {args[0]}: Zeitüberschreitung")
         except FileNotFoundError:
@@ -153,7 +202,9 @@ class SystemdManager(Manager):
             raise ManagerError(f"systemctl start: {(p.stderr or p.stdout).strip()}")
 
     def stop(self, timeout: float) -> None:
-        p = self._run("stop")
+        # systemctl stop kehrt erst zurück, wenn der Dienst aus ist (spätestens nach TimeoutStopSec + SIGKILL). Vorher abbrechen
+        # hieße: Fehler melden, obwohl der Dienst gleich darauf doch beendet wird.
+        p = self._run("stop", timeout=max(self.timeout, float(timeout) + STOP_MARGIN_S))
         if p.returncode != 0:
             raise ManagerError(f"systemctl stop: {(p.stderr or p.stdout).strip()}")
 
@@ -171,7 +222,13 @@ class SystemdManager(Manager):
         cap = max(1, min(lines, 500)) if not (since or until) else max(1, min(lines, 20000))
         args += ["-n", str(cap)]
         try:
-            p = subprocess.run(args, capture_output=True, text=True, timeout=15)
+            p = subprocess.run(args, capture_output=True, text=True, timeout=LOG_TIMEOUT_S)
+        except subprocess.TimeoutExpired as e:             # langsam (großer Zeitraum, Pi ausgelastet): Teilausgabe zeigen
+            out = e.stdout or e.output or ""
+            if isinstance(out, bytes):
+                out = out.decode("utf-8", "replace")
+            lines = out.strip().splitlines()
+            return lines + ["(Zeitüberschreitung: Ausgabe unvollständig – kleineren Zeitraum wählen)"] if lines else []
         except Exception:
             return []
         if p.returncode != 0:
@@ -186,7 +243,8 @@ def make_manager(cfg: Config) -> Manager:
         kind = "systemd" if shutil.which(cfg.systemctl_command.split()[-1]) and os.path.isdir("/run/systemd/system") \
             else "process"
     if kind == "systemd":
-        return SystemdManager(cfg.service_name, cfg.systemctl_command)
+        return SystemdManager(cfg.service_name, cfg.systemctl_command,
+                              timeout=max(60.0, float(cfg.stop_timeout_s) + STOP_MARGIN_S))
     if kind == "process":
         return ProcessManager(cfg.start_command, cfg.repo_dir, cfg.data_dir)
     raise ManagerError(f"Unbekannter manager: {cfg.manager}")

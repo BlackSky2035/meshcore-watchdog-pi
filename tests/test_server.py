@@ -127,3 +127,51 @@ def test_update_via_api(web, env):
             break
         time.sleep(0.2)
     assert s["job"]["ok"] is True and env.version() == "2"
+
+
+def test_log_endpoint_allows_only_one_journal_read_at_a_time(web, env, monkeypatch):
+    """journalctl kann dauern: höchstens ein Aufruf gleichzeitig, weitere bekommen sofort 429 statt Verbindungen zu belegen."""
+    gate = threading.Event()
+    monkeypatch.setattr(env.up, "log_tail", lambda n, since="", until="": (gate.wait(5), ["x"])[1])
+    base = web()
+    first = {}
+    t = threading.Thread(target=lambda: first.setdefault("r", call(base + "/api/log")), daemon=True)
+    t.start()
+    time.sleep(0.3)
+    t0 = time.monotonic()
+    code, body = call(base + "/api/log")
+    took = time.monotonic() - t0
+    gate.set()
+    t.join(5)
+    assert code == 429 and "Protokoll" in json.loads(body)["error"] and took < 2
+    assert first["r"][0] == 200
+    assert call(base + "/api/log")[0] == 200               # danach wieder frei
+
+
+def test_post_with_foreign_host_header_is_rejected(web, env):
+    """Schutz vor DNS-Rebinding: ändernde Aufrufe nur mit bekanntem Host-Namen."""
+    base = web()
+    h = {"X-Watchdog": "1"}
+    assert call(base + "/api/check", "POST", {**h, "Host": "boese.example.com"})[0] == 403
+    assert call(base + "/api/status", headers={"Host": "boese.example.com"})[0] == 200     # Lesen bleibt offen
+    _wait_idle(env)
+    assert call(base + "/api/check", "POST", {**h, "Host": "station.tail1234.ts.net"})[0] == 202
+    _wait_idle(env)
+    assert call(base + "/api/check", "POST", {**h, "Host": "localhost:8100"})[0] == 202
+    _wait_idle(env)
+    assert call(base + "/api/check", "POST", {**h, "Host": "192.168.1.20:8100"})[0] == 202
+    _wait_idle(env)
+    assert call(base + "/api/check", "POST", {**h, "Host": "[::1]:8100"})[0] == 202
+    _wait_idle(env)
+    import socket
+    assert call(base + "/api/check", "POST", {**h, "Host": socket.gethostname() + ".local"})[0] == 202
+    _wait_idle(env)
+    env.cfg.allowed_hosts = ("watchdog.heim.lan",)
+    assert call(base + "/api/check", "POST", {**h, "Host": "watchdog.heim.lan:8100"})[0] == 202
+
+
+def _wait_idle(env):
+    for _ in range(100):
+        if not env.up.job["running"]:
+            return
+        time.sleep(0.1)

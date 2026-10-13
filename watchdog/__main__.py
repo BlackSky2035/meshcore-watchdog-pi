@@ -163,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
                  updater.mgr.name, cfg.repo_dir)
     if cfg.host not in ("127.0.0.1", "localhost") and not cfg.token:
         log.warning("Der Watchdog ist im Netz erreichbar, aber es ist kein token gesetzt!")
+    elif not cfg.token:                          # 127.0.0.1 hinter `tailscale serve`: im ganzen Tailnet erreichbar
+        log.info("Hinweis: kein token gesetzt. Hinter tailscale serve kann jeder im Tailnet Aktionen auslösen.")
 
     # Autostart-Prüfung im Hintergrund: ein langsamer Dienst-Manager verzögert den Start der Oberfläche nicht
     threading.Thread(target=_safe_startup, args=(updater,), name="startup", daemon=True).start()
