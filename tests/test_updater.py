@@ -518,17 +518,76 @@ def test_untracked_file_collision_is_found_before_stopping(env):
     assert env.up.state["blocked"] is None
 
 
-def test_ignored_files_do_not_count_as_collision(env):
+def test_ignored_files_count_as_collision_and_are_protected(env):
+    """Verhalten bewusst geändert (früher: ignorierte Dateien zählten nicht). git überschreibt eine lokal IGNORIERTE Datei
+    beim Fast-Forward ohne Rückfrage, und ein späterer Rollback (reset --hard) löscht sie. Checkt upstream so eine Datei ein
+    (Versehen), wird das Update VOR dem Stoppen abgelehnt: Datei unverändert, Programm läuft weiter, nichts gesperrt."""
     started(env)
     env.push("ignore", **{".gitignore": "IGN.txt\n"})
     assert env.up.run("update")[0]
-    (env.app / "IGN.txt").write_text("lokal")                # ignoriert: git überschreibt sie ohnehin
+    pid = env.mgr._proc.pid
+    (env.app / "IGN.txt").write_text("lokal")
+    (env.seed / "IGN.txt").write_text("aus dem Repo")
+    git(env.seed, "add", "-f", "IGN.txt")
+    git(env.seed, "commit", "-q", "-m", "ign")
+    git(env.seed, "push", "-q", "origin", "main")
+    ok, msg = env.up.run("update")
+    assert not ok and "IGN.txt" in msg and "nichts gestoppt" in msg, msg
+    assert (env.app / "IGN.txt").read_text() == "lokal"
+    assert env.mgr._proc is not None and env.mgr._proc.pid == pid
+    assert env.up.state["blocked"] is None and not env.up.state.get("pending")
+
+
+def test_upstream_checking_in_ignored_config_toml_is_refused(env):
+    """config.toml ist lokal vorhanden und ignoriert; upstream checkt versehentlich eine config.toml ein."""
+    started(env)
+    env.push("ignore config", **{".gitignore": "config.toml\ndata/\n"})
+    assert env.up.run("update")[0]
+    pid = env.mgr._proc.pid
+    head = env.head()
+    (env.app / "config.toml").write_text("token = \"lokal-geheim\"\n")
+    (env.seed / "config.toml").write_text("token = \"\"\n")
+    git(env.seed, "add", "-f", "config.toml")
+    git(env.seed, "commit", "-q", "-m", "config versehentlich")
+    git(env.seed, "push", "-q", "origin", "main")
+    ok, msg = env.up.run("update")
+    assert not ok and "config.toml" in msg and "nichts gestoppt" in msg, msg
+    assert (env.app / "config.toml").read_text() == "token = \"lokal-geheim\"\n"
+    assert env.head() == head
+    assert env.mgr._proc is not None and env.mgr._proc.pid == pid      # Programm nicht angehalten
+    assert env.up.state["blocked"] is None
+
+
+def test_ignored_file_in_ignored_folder_is_protected(env):
+    """Auch Dateien in ignorierten Ordnern (data/meshcore.db) zählen; nicht vorhandene ignorierte Pfade stören nicht."""
+    started(env)
+    env.push("ignore data", **{".gitignore": "data/\n"})
+    assert env.up.run("update")[0]
+    (env.app / "data").mkdir()
+    (env.app / "data" / "meshcore.db").write_text("lokale daten")
+    (env.seed / "data").mkdir()
+    (env.seed / "data" / "meshcore.db").write_text("aus dem Repo")
+    (env.seed / "data" / "andere.txt").write_text("neu")
+    git(env.seed, "add", "-f", "data")
+    git(env.seed, "commit", "-q", "-m", "data versehentlich")
+    git(env.seed, "push", "-q", "origin", "main")
+    ok, msg = env.up.run("update")
+    assert not ok and "data/meshcore.db" in msg and "andere.txt" not in msg, msg
+    assert (env.app / "data" / "meshcore.db").read_text() == "lokale daten"
+
+
+def test_ignored_but_absent_file_does_not_block(env):
+    """Eine im neuen Stand eingecheckte, lokal ignorierte Datei, die es lokal NICHT gibt, ist kein Hindernis."""
+    started(env)
+    env.push("ignore", **{".gitignore": "IGN.txt\n"})
+    assert env.up.run("update")[0]
     (env.seed / "IGN.txt").write_text("aus dem Repo")
     git(env.seed, "add", "-f", "IGN.txt")
     git(env.seed, "commit", "-q", "-m", "ign")
     git(env.seed, "push", "-q", "origin", "main")
     ok, msg = env.up.run("update")
     assert ok, msg
+    assert (env.app / "IGN.txt").read_text() == "aus dem Repo"
 
 
 def test_rollback_after_healthy_but_unwanted_update_goes_to_previous_good(env):

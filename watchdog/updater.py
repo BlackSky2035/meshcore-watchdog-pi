@@ -401,6 +401,14 @@ class Updater:
             more = " …" if len(clash) > 5 else ""
             raise OpError(f"Nicht nachverfolgte Dateien im Projekt würden vom Update überschrieben: {', '.join(clash[:5])}{more}. "
                           "Bitte verschieben oder löschen. Es wurde nichts gestoppt.")
+        # Ignorierte Dateien (config.toml, data/…) würde git beim Fast-Forward stillschweigend überschreiben, und ein Rollback
+        # (reset --hard) löschte sie danach. Checkt der neue Stand so eine Datei ein (meist ein Versehen upstream): ablehnen.
+        ignored = gitops.ignored_collisions(repo, prev, target)
+        if ignored:
+            more = " …" if len(ignored) > 5 else ""
+            raise OpError(f"Das Update würde lokale, ignorierte Dateien überschreiben: {', '.join(ignored[:5])}{more} "
+                          "(im neuen Stand eingecheckt, vermutlich ein Versehen). Zum Schutz der lokalen Daten wird nicht "
+                          "aktualisiert. Es wurde nichts gestoppt.")
         need_deps = self._needs_install(prev, target)
         self._say(f"Update {gitops.short(prev)} → {gitops.short(target)} ({behind} Änderung(en))")
         # Merker für einen Abbruch mittendrin (Neustart von Watchdog oder Pi): startup() stellt dann `prev` wieder her

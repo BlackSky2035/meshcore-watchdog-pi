@@ -245,6 +245,89 @@ def test_backup_does_not_modify_source(tmp_path):
     assert src.read_bytes() == before
 
 
+def test_backup_failure_removes_tmp_file(tmp_path, monkeypatch):
+    """Scheitert die Kopie mittendrin, bleibt keine halbe meshcore-*.tmp liegen (früher: jede Stunde eine neue)."""
+    import watchdog.backup as wb
+    src = tmp_path / "app.db"
+    make_db(src)
+    real_connect = wb.sqlite3.connect
+
+    class Src:
+        def __init__(self, c):
+            self.c = c
+
+        def backup(self, d):
+            d.execute("CREATE TABLE halb(x)")
+            d.commit()
+            raise wb.sqlite3.OperationalError("Platte voll")
+
+        def close(self):
+            self.c.close()
+
+    monkeypatch.setattr(wb.sqlite3, "connect",
+                        lambda target, *a, **kw: Src(real_connect(target, *a, **kw)) if "mode=ro" in str(target)
+                        else real_connect(target, *a, **kw))
+    b = Backup(str(src), str(tmp_path / "bk"))
+    assert b.run() is False and "Platte voll" in b.last_error
+    assert list((tmp_path / "bk").glob("meshcore-*")) == []
+
+
+def test_backup_removes_stale_tmp_at_start_and_before_each_run(tmp_path):
+    src = tmp_path / "app.db"
+    make_db(src)
+    bk = tmp_path / "bk"
+    bk.mkdir()
+    (bk / "meshcore-20260101-000000.tmp").write_text("rest")
+    (bk / "anderes.tmp").write_text("fremd")                    # fremde Dateien bleiben
+    b = Backup(str(src), str(bk))
+    assert not (bk / "meshcore-20260101-000000.tmp").exists()   # beim Start weg
+    (bk / "meshcore-20260102-000000.tmp").write_text("rest")
+    assert b.run()
+    assert not list(bk.glob("meshcore-*.tmp")) and (bk / "anderes.tmp").exists()
+
+
+def test_backup_skipped_when_disk_is_too_full(tmp_path):
+    from collections import namedtuple
+    import watchdog.backup as wb
+    Usage = namedtuple("Usage", "total used free")
+    src = tmp_path / "app.db"
+    make_db(src)
+    size = src.stat().st_size
+    free = [wb.MIN_FREE_EXTRA + 2 * size - 1]
+    b = Backup(str(src), str(tmp_path / "bk"), disk_usage=lambda p: Usage(10**12, 0, free[0]))
+    assert b.run() is False
+    assert not list((tmp_path / "bk").glob("meshcore-*"))
+    assert "ausgelassen" in b.problem() and "Platz" in b.problem()
+    free[0] = wb.MIN_FREE_EXTRA + 2 * size + 10**6               # genug Platz: klappt wieder, Problem weg
+    assert b.run() is True and b.problem() is None
+
+
+def test_backup_second_target_too_full_is_only_a_note(tmp_path):
+    from collections import namedtuple
+    Usage = namedtuple("Usage", "total used free")
+    src = tmp_path / "app.db"
+    make_db(src)
+    (tmp_path / "stick").mkdir()
+
+    def usage(p):
+        return Usage(10**12, 0, 10 if "stick" in str(p) else 10**12)
+    b = Backup(str(src), str(tmp_path / "bk"), extra_dir=str(tmp_path / "stick"), disk_usage=usage)
+    assert b.run() is True and b.problem() is None
+    assert any("Zweites Ziel ausgelassen" in n for n in b.notes)
+    assert not list((tmp_path / "stick").glob("meshcore-*"))
+
+
+def test_backup_disk_usage_failure_does_not_crash(tmp_path):
+    """Ist der freie Platz nicht messbar (disk_usage wirft), wird trotzdem gesichert und nichts wirft."""
+    src = tmp_path / "app.db"
+    make_db(src)
+
+    def broken(p):
+        raise OSError("statvfs kaputt")
+    b = Backup(str(src), str(tmp_path / "bk"), disk_usage=broken)
+    assert b.run() is True and b.problem() is None
+
+
 # ---- Einbindung -------------------------------------------------------------------------
 def test_status_includes_system_and_backup_problems(tmp_path):
     w = watch(tmp_path, lambda: 1.0, time=lambda: False)

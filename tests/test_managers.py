@@ -174,3 +174,50 @@ def test_process_manager_ignores_reused_pid_from_old_pidfile(tmp_path):
     finally:
         foreign.kill()
         foreign.wait()
+
+
+def test_systemd_is_active_runs_without_sudo_but_start_stop_with_it(tmp_path, monkeypatch):
+    """Mit systemctl_command = "sudo systemctl" läuft is-active (alle 3 s) OHNE sudo, start/stop weiter mit sudo."""
+    from watchdog import managers
+    calls = []
+
+    class P:
+        returncode, stdout, stderr = 0, "active\n", ""
+
+    monkeypatch.setattr(managers.subprocess, "run", lambda cmd, **kw: (calls.append(cmd), P())[1])
+    m = SystemdManager("meshcore-remote", "sudo -n /usr/bin/systemctl")
+    assert m.is_active()
+    m.start()
+    m.stop(5)
+    assert calls[0] == ["/usr/bin/systemctl", "is-active", "meshcore-remote"]
+    assert calls[1] == ["sudo", "-n", "/usr/bin/systemctl", "start", "meshcore-remote"]
+    assert calls[2] == ["sudo", "-n", "/usr/bin/systemctl", "stop", "meshcore-remote"]
+
+
+def test_systemd_query_command_variants():
+    from watchdog.managers import query_command
+    assert query_command(["sudo", "systemctl"]) == ["systemctl"]
+    assert query_command(["systemctl"]) == ["systemctl"]
+    assert query_command(["/usr/bin/sudo", "-n", "/bin/systemctl", "--no-ask-password"]) == ["/bin/systemctl", "--no-ask-password"]
+    assert query_command(["sudo", "mein-helfer"]) == ["sudo", "mein-helfer"]       # unbekannt: unverändert
+    assert query_command([]) == []
+
+
+def test_systemd_with_fake_sudo_and_fake_systemctl(fake_systemctl, tmp_path):
+    """Fake-sudo protokolliert jeden Aufruf: is-active darf dort nie auftauchen."""
+    sudo_log = tmp_path / "sudo.log"
+    sudo = tmp_path / "sudo"
+    sudo.write_text(f"""#!/bin/sh
+echo "$@" >> {sudo_log}
+exec "$@"
+""")
+    sudo.chmod(sudo.stat().st_mode | stat.S_IEXEC)
+    m = SystemdManager("meshcore-remote", f"{sudo} {fake_systemctl}")
+    assert not m.is_active()
+    m.start()
+    assert m.is_active()
+    m.stop(5)
+    assert not m.is_active()
+    logged = sudo_log.read_text()
+    assert "start meshcore-remote" in logged and "stop meshcore-remote" in logged
+    assert "is-active" not in logged

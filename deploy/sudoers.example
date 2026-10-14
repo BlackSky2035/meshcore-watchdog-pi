@@ -1,4 +1,6 @@
 # Erlaubt dem Benutzer "pi", genau diesen einen Dienst ohne Passwort zu starten/stoppen.
 # Installation: sudo visudo -f /etc/sudoers.d/meshcore-watchdog   (Inhalt unten einfügen)
 # Dazu in config.toml:  systemctl_command = "sudo systemctl"
+# Hinweis: Der Watchdog ruft die reine Abfrage "is-active" (alle 3 s) seit dieser Version OHNE sudo auf (braucht kein root,
+# erzeugt so keine sudo-Zeilen im Journal). Die is-active-Regel unten schadet nicht und darf bleiben.
 pi ALL=(root) NOPASSWD: /usr/bin/systemctl start meshcore-remote, /usr/bin/systemctl stop meshcore-remote, /usr/bin/systemctl is-active meshcore-remote

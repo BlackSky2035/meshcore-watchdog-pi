@@ -26,6 +26,8 @@ Eigenständiges Repo. Verwaltet das Hauptprogramm `meshcore-remote` (anderes Rep
   `gitops._run` setzt `GIT_OPTIONAL_LOCKS=0` (sonst sperrt `git status` der Statusabfrage kurz den Index und Updates scheitern zufällig). Tests: `tests/test_updater.py` (index.lock, never_leaves_the_program_stopped).
 - Unterbrochenes Update: vor dem Stoppen steht `pending={prev,target,since}` in `data/state.json`; beim nächsten Start stellt der Lauf `recover` den alten Stand her und sperrt das Ziel (höchstens 3 Versuche). `_restore` setzt immer hart zurück (`reset --hard`).
   Kollisionen mit nicht nachverfolgten Dateien (`gitops.untracked_collisions`) werden VOR dem Stoppen erkannt und abgelehnt. `_set_state` wirft nie.
+  Ebenso vorhandene IGNORIERTE Dateien (`gitops.ignored_collisions`, z. B. `config.toml`, `data/…`), die der neue Stand anlegen würde: git überschreibt
+  sie sonst ohne Rückfrage und ein Rollback (`reset --hard`) löscht sie. Tests: `tests/test_updater.py` (`ignored`, `config_toml`).
 - „Zurück auf letzten guten Stand“ nutzt `previous_good`, wenn HEAD schon `last_good` ist. Status hat zusätzlich `previous_good`, `pending`, `hints` (auch `demo.py`).
 - Änderungen an `updater.py` immer mit einem Test in `tests/test_updater.py` absichern
   (echte Git-Repos, siehe `tests/conftest.py`).
@@ -37,7 +39,14 @@ Eigenständiges Repo. Verwaltet das Hauptprogramm `meshcore-remote` (anderes Rep
 
 ## Bekannte Grenzen
 - Ein Update startet das Programm danach immer, um es zu prüfen, auch wenn es vorher absichtlich gestoppt war.
-- DNS-Rebinding: POST nur mit erlaubtem `Host` (IP-Adressen, localhost, `*.ts.net`, Rechnername und `.local`, plus `allowed_hosts`/`WD_ALLOWED_HOSTS`), sonst 403; dazu das Token. Ohne Token steht ein Hinweis in `status.hints`.
+- DNS-Rebinding: ALLE Anfragen (POST und GET inkl. Startseite) nur mit erlaubtem `Host` (IP-Adressen, localhost, `*.ts.net`, Rechnername und `.local`, plus `allowed_hosts`/`WD_ALLOWED_HOSTS`), sonst 403 (JSON); einzige Ausnahme `/api/ping`. Für POST dazu das Token. Ohne Token steht ein Hinweis in `status.hints`.
+- Slowloris (`server.py`): `REQUEST_DEADLINE_S` (15 s) Gesamtfrist je Anfrage für Kopf + Body (`_DeadlineReader`: jeder recv bekommt nur die Restzeit), danach wird getrennt.
+  `GuardedServer`: `MAX_CONNECTIONS` 48, `MAX_PER_IP` 8 je fremder Adresse, `LOCAL_RESERVED` 4 Plätze nur für den Rechner selbst (`is_local_peer`: Loopback oder eigene Adresse),
+  damit der Herzschlag (`/api/ping`) immer durchkommt. Ein Proxy auf demselben Rechner (`tailscale serve`) zählt als lokal. Tests: `tests/test_resilience.py` (slowloris, dribbling, slow_body).
+- `SystemdManager`: `is-active` läuft immer OHNE führendes `sudo` (`managers.query_command`), start/stop mit dem konfigurierten `systemctl_command`. Nur mit Fake-`systemctl`/Fake-`sudo` getestet.
+- `backup.py`: `.tmp` wird bei Fehlern gelöscht, alte `meshcore-*.tmp` beim Start und vor jeder Sicherung; vor der Kopie Platzprüfung (`space_problem`: frei ≥ 2 × DB + `MIN_FREE_EXTRA` 200 MB),
+  sonst Sicherung ausgelassen + Problem (zweites Ziel: nur Hinweis). `disk_usage`-Fehler → trotzdem sichern, nie werfen. Tests: `tests/test_sysmon.py` (`backup_*`).
+- Oberfläche: `.card { overflow-wrap:anywhere }` – lange Namen/Pfade ohne Leerzeichen brechen um (Handy). Nicht wieder `word-break:break-all` (bricht auch normale Wörter).
 - SystemdManager: automatische Tests nur mit Fake-`systemctl`; im Betrieb auf einem Pi mit systemd genutzt, nicht systematisch geprüft.
 - Beim Prozess-Manager ist ein „adoptierter“ Prozess nur über die PID-Datei bekannt (mit Startzeit aus `/proc`, damit eine wiederverwendete PID nicht als Programm gilt).
 

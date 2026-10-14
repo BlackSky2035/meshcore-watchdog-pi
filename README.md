@@ -37,6 +37,8 @@ Aufnahmen des **Demo-Modus** (`python -m watchdog --demo`): Es ist alles simulie
 </table>
 
 ## USB-Anzeige
+Lange Gerätenamen/Pfade (z. B. `/dev/serial/by-id/usb-…-if00`) werden in allen Karten umgebrochen und laufen auf dem Handy nicht mehr
+rechts aus dem Bild (im Demo-Modus mit Chromium in iPhone-Ansicht geprüft, nicht auf einem echten iPhone).
 Der Watchdog prüft selbst (ohne das Hauptprogramm zu fragen), ob ein USB-Node (`/dev/ttyACM*`, `/dev/ttyUSB*`)
 am Rechner hängt, und zeigt es in einer eigenen Karte. Mit `expect_usb = true` in der `config.toml` wird ein fehlender Node
 (nach 30 s) als Problem oben gemeldet. Nicht an echter Hardware getestet.
@@ -50,6 +52,9 @@ mitgeschrieben, die so etwas nicht beeinflusst. Ist die Uhr gesprungen, steht do
 Ausfall über einen Neustart hinweg ist die Dauer unbekannt. Gezählt wird nur, wenn der Pi GAR KEINEN Weg zu `1.1.1.1`/`8.8.8.8` hat (Prüfung alle 30 s): Ein gezogenes LAN-Kabel
 zählt nicht, solange z. B. WLAN den Weg übernimmt, und ein Ausfall unter 30 s kann durchrutschen.
 Die Datenbank des Hauptprogramms wird täglich gesichert (`data/backups`, die letzten 7; optional zusätzlich auf einen USB-Stick mit `backup_extra_dir`).
+Vor jeder Sicherung wird der freie Platz geprüft (frei ≥ 2 × Datenbank + 200 MB); reicht er nicht, wird die Sicherung ausgelassen und oben als Problem
+gemeldet (beim zweiten Ziel nur ein Hinweis). Halbfertige Kopien (`meshcore-*.tmp`) werden bei einem Fehler sofort, beim Start und vor jeder Sicherung gelöscht.
+Nur mit Testdateien und simuliertem `disk_usage` getestet.
 **Grenze:** Fällt der Rechner komplett vom Netz aus, kann er das nicht selbst melden. Nachträglich siehst du es hier; ein Alarm währenddessen braucht
 eine zweite Stelle (z. B. der andere Pi oder ein externer Herzschlag-Dienst). Tipps für den Dauerbetrieb: `deploy/pi-haertung.md`. Nicht an echter Hardware getestet.
 
@@ -111,7 +116,10 @@ cd ~/meshcore-watchdog && git status --short && git pull --ff-only origin main &
 
 ## Ablauf eines Updates
 1. Vorprüfung (richtiger Branch, keine lokalen Änderungen an versionierten Dateien), dann `git fetch`.
-   Bis hier wird nichts angehalten – ein Netzfehler schadet nicht.
+   Bis hier wird nichts angehalten – ein Netzfehler schadet nicht. Ebenfalls vorher abgelehnt: Der neue Stand würde eine lokale,
+   nicht nachverfolgte Datei überschreiben – auch eine **ignorierte** wie `config.toml` oder etwas unter `data/` (z. B. wenn upstream
+   versehentlich eine `config.toml` eincheckt). git würde ignorierte Dateien sonst stillschweigend überschreiben, und ein späteres
+   Zurücksetzen (`reset --hard`) löschte sie ganz.
 2. Programm stoppen, `git merge --ff-only`, bei geänderter `requirements.txt` `pip install`, starten.
 3. Gesundheitsprüfung: Dienst aktiv **und** `health_url` antwortet **und** bleibt `stable_s` Sekunden stabil.
 4. Schlägt etwas fehl: automatisch zurück auf den vorherigen Commit, neu starten, prüfen. Das Programm wird dabei **immer**
@@ -156,11 +164,13 @@ Die ausführliche Checkliste (Passwort im Hauptprogramm, Firewall, SSH, Router, 
 
 - Standard und Empfehlung: nur `127.0.0.1`, davor `tailscale serve` für HTTPS im Tailnet
   (Befehle im README von meshcore-remote-pi, Port 8443 → 8100). So erreicht niemand im LAN/WLAN den Watchdog.
-- Aktionen (POST) nimmt der Watchdog nur an, wenn die Seite über eine IP-Adresse, `localhost`, `*.ts.net` oder den Rechnernamen (auch `.local`) aufgerufen wird (Schutz gegen DNS-Rebinding). Eigene Namen, z. B. aus dem Router, in `allowed_hosts` eintragen. Ein Token empfiehlt sich auch hinter `tailscale serve` (die Oberfläche zeigt sonst einen Hinweis).
+- Alle Anfragen (Aktionen per POST UND Lesen per GET, auch die Startseite) beantwortet der Watchdog nur, wenn die Seite über eine IP-Adresse, `localhost`, `*.ts.net` oder den Rechnernamen (auch `.local`) aufgerufen wird (Schutz gegen DNS-Rebinding: sonst könnte eine fremde Webseite Status und Protokoll mitlesen); sonst 403. Ausnahme nur `/api/ping` (Selbstprüfung, enthält keine Daten). Eigene Namen, z. B. aus dem Router, in `allowed_hosts` eintragen – ohne das lädt die Oberfläche unter so einem Namen nicht. Ein Token empfiehlt sich auch hinter `tailscale serve` (die Oberfläche zeigt sonst einen Hinweis).
 - `host = "0.0.0.0"` nur, wenn es nicht anders geht, und dann **immer** mit `token`
   (Klartext im LAN!). Die Weboberfläche fragt danach und merkt es nur für die Browsersitzung.
 - Ändernde Aktionen verlangen den Header `X-Watchdog: 1` (Schutz vor fremden Webseiten im Browser) und
-  bei gesetztem Token `X-Token`. Lesen (`/api/status`) ist ohne Token möglich.
+  bei gesetztem Token `X-Token`. Lesen (`/api/status`) ist ohne Token möglich (aber nur mit erlaubtem Host-Namen, s. o.).
+- Mit `systemctl_command = "sudo systemctl"` laufen nur `start`/`stop` über sudo; die Statusabfrage `is-active` (alle 3 s) immer ohne sudo
+  (braucht kein root, sonst schriebe sudo laufend ins Journal). Nur mit Fake-`systemctl`/Fake-`sudo` getestet, nicht auf echtem systemd.
 - Wird der Watchdog über Tailscale (`tailscale serve`) erreichbar gemacht, ist er für alle Geräte deines Tailnets offen. Setze dann ein `token` und beschränke Port 8443 per Tailscale-ACL.
 - **Wer auf `main` pushen kann, kann Code auf deinen Pis ausführen.** GitHub-Konto mit 2FA schützen.
   Bei privatem Repo auf dem Pi einen Deploy-Key (nur lesen) einrichten.
@@ -208,7 +218,12 @@ Der Demo-Modus nutzt `data/demo.db`.
   als 30 s, steht ein Hinweis in der Oberfläche. Der Ablauf (Lauf-Anzeige) ist immer live.
 - **Fehler werden zu Meldungen:** Jede Anfrage ist abgesichert (JSON-Fehler 500 statt Verbindungsabbruch); Teile des
   Status werden einzeln abgefangen (`problems`), kaputte Anfragen (falsche Länge, kein JSON) ergeben 400.
-- **Überlast und hängende Verbindungen:** höchstens 48 gleichzeitige Verbindungen (sonst 503), 15 s Zeitlimit je Verbindung.
+- **Überlast und hängende Verbindungen:** höchstens 48 gleichzeitige Verbindungen (sonst 503), 15 s Zeitlimit je Lesevorgang und
+  zusätzlich eine **Gesamtfrist von 15 s** für das Lesen einer ganzen Anfrage (Kopf + Body, ab Annahme der Verbindung): Wer alle paar
+  Sekunden eine Kopfzeile nachschiebt („Slowloris“), wird danach getrennt. Je Client-Adresse höchstens 8 gleichzeitige Verbindungen;
+  4 Plätze sind für Verbindungen vom Rechner selbst (Loopback/eigene Adresse) reserviert, damit der eigene Herzschlag (`/api/ping`) immer
+  durchkommt. Grenze: Läuft ein Proxy auf demselben Rechner (`tailscale serve`), zählen dessen Verbindungen als lokal; dann schützen nur
+  die Gesamtzahl und die Frist. Getestet mit lokalen Test-Verbindungen, nicht mit einem echten Angriff übers Netz.
 - **`/api/ping`** antwortet ohne jeden Zugriff auf Git/Manager: für Selbstprüfung und Monitoring.
 - **Server-Schleife:** Bricht der HTTP-Server ab oder ist der Port belegt, wird er nach 1, 2, 4 … (max. 30) s neu aufgebaut.
 - **Notbetrieb:** Kaputte `config.toml`, fehlendes `repo_dir` oder ein nicht aufbaubarer Manager stoppen den Watchdog nicht mehr:

@@ -159,6 +159,124 @@ def test_connection_limit_gives_503_not_hang(srv, monkeypatch):
         h.close()
 
 
+def _ping_from(port, src="127.0.0.1"):
+    """GET /api/ping über eine eigene Verbindung (optional von einer bestimmten lokalen Adresse)."""
+    c = socket.create_connection(("127.0.0.1", port), timeout=3, source_address=(src, 0))
+    try:
+        c.sendall(b"GET /api/ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        return c.recv(200)
+    finally:
+        c.close()
+
+
+def test_slowloris_cannot_block_own_ping(srv, monkeypatch):
+    """Viele tröpfelnde Verbindungen von EINER fremden Adresse: Je Adresse gibt es nur wenige Plätze, Plätze für den Rechner selbst
+    sind reserviert. Der eigene Herzschlag (/api/ping von 127.0.0.1) bekommt weiter 200."""
+    monkeypatch.setattr(wserver, "REQUEST_DEADLINE_S", 30.0)
+    base, _, s = srv(max_connections=10, max_per_ip=3, local_reserved=2)
+    port = s.server_address[1]
+    # 127.0.0.2 ist auch Loopback; damit eine „fremde“ Adresse entsteht, gilt im Test nur 127.0.0.1 als lokal
+    monkeypatch.setattr(wserver, "is_local_peer", lambda ip, own=None: ip == "127.0.0.1")
+    attackers = []
+    try:
+        for i in range(12):                              # mehr als Plätze je Adresse und insgesamt
+            src = f"127.0.0.{2 + i % 4}"                 # 4 „fremde“ Adressen, je 3 erlaubt → 8 Plätze (10 - 2 reserviert)
+            c = socket.create_connection(("127.0.0.1", port), timeout=3, source_address=(src, 0))
+            c.sendall(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n")    # Kopf nie fertig
+            attackers.append(c)
+        time.sleep(0.5)
+        assert s._total <= 10 - 2                        # die Reserve bleibt frei
+        assert all(n <= 3 for ip, n in s._per_ip.items() if ip != "127.0.0.1")
+        assert b"200" in _ping_from(port).split(b"\r\n", 1)[0]
+        assert b"200" in _ping_from(port).split(b"\r\n", 1)[0]
+    finally:
+        for c in attackers:
+            c.close()
+
+
+def test_dribbling_connection_is_closed_after_total_deadline(srv, monkeypatch):
+    """Eine Verbindung, die alle 0,3 s eine Kopfzeile nachschiebt (jeder einzelne Lesevorgang ist schnell), wird nach der
+    Gesamtfrist geschlossen und gibt ihren Platz frei."""
+    monkeypatch.setattr(wserver, "REQUEST_DEADLINE_S", 1.5)
+    base, _, s = srv()
+    port = s.server_address[1]
+    c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    t0 = time.monotonic()
+    closed_after = None
+    try:
+        c.sendall(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+        for i in range(40):                              # bis 12 s lang tröpfeln
+            time.sleep(0.3)
+            try:
+                c.sendall(f"X-Slow-{i}: a\r\n".encode())
+            except OSError:
+                closed_after = time.monotonic() - t0
+                break
+            c.settimeout(0.01)
+            try:
+                if c.recv(100) == b"":
+                    closed_after = time.monotonic() - t0
+                    break
+            except (socket.timeout, BlockingIOError):
+                pass
+            except OSError:
+                closed_after = time.monotonic() - t0
+                break
+    finally:
+        c.close()
+    assert closed_after is not None and closed_after < 5, closed_after
+    for _ in range(20):
+        if s._total == 0:
+            break
+        time.sleep(0.1)
+    assert s._total == 0
+    assert call(base + "/api/ping")[0] == 200
+
+
+def test_slow_but_complete_request_within_deadline_still_works(srv, monkeypatch):
+    """Die Frist stört normale (auch etwas langsame) Anfragen nicht, auch POST mit Body."""
+    monkeypatch.setattr(wserver, "REQUEST_DEADLINE_S", 3.0)
+    base, up, s = srv()
+    port = s.server_address[1]
+    c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        for part in (b"POST /api/check HTTP/1.1\r\n", b"Host: 127.0.0.1\r\nX-Watchdog: 1\r\n",
+                     b"Content-Length: 2\r\n\r\n", b"{}"):
+            c.sendall(part)
+            time.sleep(0.3)
+        assert b"202" in c.recv(200).split(b"\r\n", 1)[0]
+    finally:
+        c.close()
+
+
+def test_slow_body_is_cut_off_by_deadline(srv, monkeypatch):
+    """Auch der Body zählt zur Frist: ein Body, der nie fertig wird, belegt den Platz nicht länger als die Frist."""
+    monkeypatch.setattr(wserver, "REQUEST_DEADLINE_S", 1.0)
+    base, up, s = srv()
+    port = s.server_address[1]
+    c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        c.sendall(b"POST /api/check HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Watchdog: 1\r\nContent-Length: 100\r\n\r\n{")
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 5 and s._total:
+            try:
+                c.sendall(b" ")
+            except OSError:
+                break
+            time.sleep(0.2)
+        assert time.monotonic() - t0 < 4
+    finally:
+        c.close()
+    assert up.started == []                              # nichts ausgeführt
+
+
+def test_ping_is_open_for_any_host_but_status_is_not(srv):
+    base, _, _ = srv()
+    assert call(base + "/api/ping", headers={"Host": "evil.example"})[0] == 200
+    assert call(base + "/api/status", headers={"Host": "evil.example"})[0] == 403
+    assert call(base + "/", headers={"Host": "evil.example"})[0] == 403
+
+
 def test_missing_index_html_has_fallback(srv, monkeypatch, tmp_path):
     monkeypatch.setattr(wserver, "STATIC", tmp_path)
     base, _, _ = srv()

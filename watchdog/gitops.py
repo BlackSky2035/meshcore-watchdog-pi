@@ -96,20 +96,51 @@ def clear_stale_index_lock(repo: str, older_than_s: float = STALE_LOCK_S, now=ti
         return False
 
 
-def untracked_collisions(repo: str, old: str, new: str) -> list[str]:
-    """Nicht nachverfolgte (und nicht ignorierte) Dateien, die ein Fast-Forward von `old` nach `new` überschreiben müsste.
-    Git bricht den Merge dann ab. Ignorierte Dateien überschreibt git ohne Rückfrage, sie zählen nicht."""
-    added = _run(repo, "diff", "--no-renames", "--name-only", "--diff-filter=A", old, new).splitlines()
-    if not added:
-        return []
-    untracked = set(_run(repo, "ls-files", "--others", "--exclude-standard").splitlines())
+def _added_paths(repo: str, old: str, new: str) -> list[str]:
+    return _run(repo, "diff", "--no-renames", "--name-only", "--diff-filter=A", old, new).splitlines()
+
+
+def _hits(added: list[str], present: set[str]) -> list[str]:
     out = []
     for path in added:
         parts = path.split("/")
         parents = ["/".join(parts[:i]) for i in range(1, len(parts))]   # Datei, wo das Update einen Ordner braucht
-        if path in untracked or any(p in untracked for p in parents):
+        if path in present or any(p in present for p in parents):
             out.append(path)
     return sorted(out)
+
+
+def untracked_collisions(repo: str, old: str, new: str) -> list[str]:
+    """Nicht nachverfolgte (und nicht ignorierte) Dateien, die ein Fast-Forward von `old` nach `new` überschreiben müsste.
+    Git bricht den Merge dann ab. Ignorierte Dateien prüft `ignored_collisions`."""
+    added = _added_paths(repo, old, new)
+    if not added:
+        return []
+    untracked = set(_run(repo, "ls-files", "--others", "--exclude-standard").splitlines())
+    return _hits(added, untracked)
+
+
+PATHSPEC_CHUNK = 200
+
+
+def ignored_collisions(repo: str, old: str, new: str) -> list[str]:
+    """Vorhandene, lokal IGNORIERTE Dateien (z. B. config.toml, data/…), die ein Fast-Forward von `old` nach `new` anlegen
+    würde. Git überschreibt solche Dateien beim Merge OHNE Rückfrage, und ein späteres Zurücksetzen (reset --hard auf den
+    alten Stand) löscht sie dann sogar: die lokale Konfiguration/Daten wären weg. Deshalb muss das Update vorher abgelehnt werden.
+    Gefragt wird nur nach den betroffenen Pfaden (samt Elternordnern), nicht nach allen ignorierten Dateien (venv ist groß)."""
+    added = _added_paths(repo, old, new)
+    if not added:
+        return []
+    wanted: set[str] = set()
+    for path in added:
+        parts = path.split("/")
+        wanted.update("/".join(parts[:i]) for i in range(1, len(parts) + 1))
+    specs = sorted(wanted)
+    present: set[str] = set()
+    for i in range(0, len(specs), PATHSPEC_CHUNK):
+        chunk = [":(literal)" + p for p in specs[i:i + PATHSPEC_CHUNK]]
+        present.update(_run(repo, "ls-files", "--others", "--ignored", "--exclude-standard", "--", *chunk).splitlines())
+    return _hits(added, present)
 
 
 def changed_files(repo: str, old: str, new: str) -> set[str]:

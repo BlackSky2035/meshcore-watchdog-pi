@@ -175,17 +175,31 @@ class ProcessManager(Manager):
 
 
 # --------------------------------------------------------------------------- systemd
+def query_command(cmd: list[str]) -> list[str]:
+    """Befehl für reine Abfragen (is-active): der konfigurierte systemctl-Befehl OHNE vorangestelltes sudo. Abfragen brauchen
+    kein root, und `sudo` schriebe bei der Statusabfrage alle 3 s Zeilen ins Journal. Erkannt wird „sudo [Optionen] …systemctl …“;
+    passt das nicht (anderes Hilfsprogramm), bleibt der Befehl unverändert."""
+    if not cmd or os.path.basename(cmd[0]) != "sudo":
+        return list(cmd)
+    for i, part in enumerate(cmd[1:], start=1):
+        if os.path.basename(part) == "systemctl":
+            return list(cmd[i:])
+    return list(cmd)
+
+
 class SystemdManager(Manager):
     name = "systemd"
 
     def __init__(self, service: str, systemctl: str = "systemctl", timeout: float = 60):
         self.service = service
         self.cmd = shlex.split(systemctl)
+        self.query_cmd = query_command(self.cmd)
         self.timeout = timeout
 
-    def _run(self, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
+    def _run(self, *args: str, timeout: float | None = None, query: bool = False) -> subprocess.CompletedProcess:
+        cmd = self.query_cmd if query else self.cmd
         try:
-            return subprocess.run([*self.cmd, *args, self.service], capture_output=True,
+            return subprocess.run([*cmd, *args, self.service], capture_output=True,
                                   text=True, timeout=timeout or self.timeout)
         except subprocess.TimeoutExpired:
             raise ManagerError(f"systemctl {args[0]}: Zeitüberschreitung")
@@ -193,7 +207,7 @@ class SystemdManager(Manager):
             raise ManagerError("systemctl nicht gefunden (läuft das auf einem systemd-System?)")
 
     def is_active(self) -> bool:
-        p = self._run("is-active")
+        p = self._run("is-active", query=True)          # reine Abfrage: ohne sudo (läuft alle 3 s)
         return p.returncode == 0 and p.stdout.strip() == "active"
 
     def start(self) -> None:

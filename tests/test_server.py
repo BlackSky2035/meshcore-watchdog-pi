@@ -153,7 +153,7 @@ def test_post_with_foreign_host_header_is_rejected(web, env):
     base = web()
     h = {"X-Watchdog": "1"}
     assert call(base + "/api/check", "POST", {**h, "Host": "boese.example.com"})[0] == 403
-    assert call(base + "/api/status", headers={"Host": "boese.example.com"})[0] == 200     # Lesen bleibt offen
+    assert call(base + "/api/status", headers={"Host": "boese.example.com"})[0] == 403     # Lesen auch geschützt
     _wait_idle(env)
     assert call(base + "/api/check", "POST", {**h, "Host": "station.tail1234.ts.net"})[0] == 202
     _wait_idle(env)
@@ -175,3 +175,17 @@ def _wait_idle(env):
         if not env.up.job["running"]:
             return
         time.sleep(0.1)
+
+
+def test_get_with_foreign_host_header_is_rejected_except_ping(web, env):
+    """DNS-Rebinding: auch Lesen (Status, Protokoll, Läufe, Messwerte, Startseite) nur mit bekanntem Host. /api/ping bleibt offen."""
+    base = web()
+    for path in ("/", "/index.html", "/api/status", "/api/log", "/api/runs", "/api/runs/1", "/api/metrics", "/gibtsnicht"):
+        code, body = call(base + path, headers={"Host": "evil.example"})
+        assert code == 403 and "DNS-Rebinding" in json.loads(body)["error"], path
+    assert call(base + "/api/ping", headers={"Host": "evil.example"})[0] == 200
+    for host in ("127.0.0.1:8100", "localhost", "x.ts.net", "[::1]:8100"):
+        assert call(base + "/api/status", headers={"Host": host})[0] == 200, host
+        assert call(base + "/", headers={"Host": host})[0] == 200, host
+    env.cfg.allowed_hosts = (".heim.lan",)
+    assert call(base + "/api/status", headers={"Host": "watchdog.heim.lan"})[0] == 200
