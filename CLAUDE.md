@@ -21,6 +21,9 @@ Eigenständiges Repo. Verwaltet das Hauptprogramm `meshcore-remote` (anderes Rep
 - Nichts automatisch aus GitHub ziehen; Updates nur auf Anforderung (UI/CLI).
 - Vor dem Stoppen immer erst vorprüfen und `git fetch`. Nach jedem Start Gesundheitsprüfung.
 - Fehlgeschlagene Commits als `blocked` merken (kein Wiederholungs-Loop). Erst `_restore(prev)`, dann `blocked` setzen, und nur wenn der neue Stand schon eingespielt war; ein Stopp-Fehler sperrt nichts.
+- `_restore` startet das Programm IMMER (auch wenn `head`/`reset_hard` scheitert: dann Meldung „Zurücksetzen … fehlgeschlagen; Programm mit vorhandenem Stand gestartet“, kein `_mark_good`).
+  Verwaistes `.git/index.lock` (älter als `gitops.STALE_LOCK_S` = 120 s) wird in `_restore` und in `_preflight` entfernt (`clear_stale_index_lock`, wirft nie); ein frisches → Update vor dem Stoppen abgelehnt.
+  `gitops._run` setzt `GIT_OPTIONAL_LOCKS=0` (sonst sperrt `git status` der Statusabfrage kurz den Index und Updates scheitern zufällig). Tests: `tests/test_updater.py` (index.lock, never_leaves_the_program_stopped).
 - Unterbrochenes Update: vor dem Stoppen steht `pending={prev,target,since}` in `data/state.json`; beim nächsten Start stellt der Lauf `recover` den alten Stand her und sperrt das Ziel (höchstens 3 Versuche). `_restore` setzt immer hart zurück (`reset --hard`).
   Kollisionen mit nicht nachverfolgten Dateien (`gitops.untracked_collisions`) werden VOR dem Stoppen erkannt und abgelehnt. `_set_state` wirft nie.
 - „Zurück auf letzten guten Stand“ nutzt `previous_good`, wenn HEAD schon `last_good` ist. Status hat zusätzlich `previous_good`, `pending`, `hints` (auch `demo.py`).

@@ -328,6 +328,9 @@ class Updater:
         branch = gitops.current_branch(cfg.repo_dir)
         if branch != cfg.branch:
             raise OpError(f"Im Projekt ist Branch „{branch}“ ausgecheckt, erwartet „{cfg.branch}“")
+        if not gitops.clear_stale_index_lock(cfg.repo_dir):
+            raise OpError("Git ist im Projekt gerade gesperrt (.git/index.lock, läuft ein anderer git-Befehl?). "
+                          "Es wurde nichts gestoppt; in ein paar Minuten erneut versuchen.")
         if need_clean and gitops.is_dirty(cfg.repo_dir):
             raise OpError("Im Projekt gibt es lokale Änderungen an nachverfolgten Dateien. "
                           "Aus Sicherheit wird nichts überschrieben und nichts gestoppt.")
@@ -453,23 +456,37 @@ class Updater:
         cfg, repo = self.cfg, self.cfg.repo_dir
         self._say(f"Stelle Stand {gitops.short(commit)} wieder her …")
         try:
-            try:
-                self.mgr.stop(cfg.stop_timeout_s)
-            except ManagerError as e:               # z. B. Zeitüberschreitung: trotzdem zurücksetzen und starten
-                self._say(f"Warnung beim Stoppen: {e}")
+            self.mgr.stop(cfg.stop_timeout_s)
+        except ManagerError as e:                   # z. B. Zeitüberschreitung: trotzdem zurücksetzen und starten
+            self._say(f"Warnung beim Stoppen: {e}")
+        git_err = None
+        try:
             current = gitops.head(repo)
             reinstall = current != commit and self._needs_install(current, commit)
-            gitops.reset_hard(repo, commit)
+            try:
+                gitops.reset_hard(repo, commit)
+            except GitError:
+                if not gitops.clear_stale_index_lock(repo):   # z. B. index.lock von einem Stromausfall mitten im Update
+                    raise
+                gitops.reset_hard(repo, commit)
             if reinstall:
                 try:
                     self._install()
                 except OpError as e:               # alter Stand läuft oft trotzdem (Pakete sind noch da)
                     self._say(f"Warnung: {e} – starte trotzdem")
+        except (GitError, OpError) as e:
+            git_err = str(e)
+            self._say(f"Zurücksetzen fehlgeschlagen ({git_err}) – starte das Programm trotzdem")
+        # Das Programm darf nie gestoppt bleiben: auch wenn git scheitert (gesperrt, Platte voll), wird gestartet.
+        try:
             self._say("Starte Programm …")
             self.mgr.start()
             ok, why = self.wait_healthy()
-        except (GitError, ManagerError, OpError) as e:
-            return False, str(e)
+        except (ManagerError, OpError) as e:
+            ok, why = False, str(e)
+        if git_err:
+            state = "läuft wieder" if ok else f"startet nicht ({why})"
+            return False, f"Zurücksetzen auf {gitops.short(commit)} fehlgeschlagen ({git_err}); Programm mit vorhandenem Stand gestartet, {state}"
         if ok:
             self._mark_good()
         return ok, why

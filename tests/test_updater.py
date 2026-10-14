@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import time
 
 import pytest
@@ -563,3 +565,91 @@ def test_status_forgets_version_info_when_app_stopped(env):
     env.up.version_info = {"maintenance_until": time.time() + 600}
     assert env.up.status()["app"] == "stopped"
     assert env.up.version_info is None
+
+
+# ---- verwaistes .git/index.lock (Stromausfall mitten im Update) und Sperren-Wettlauf mit der Statusabfrage ----------
+def _lock(env, age_s):
+    lock = env.app / ".git" / "index.lock"
+    lock.write_text("")
+    t = time.time() - age_s
+    os.utime(lock, (t, t))
+    return lock
+
+
+def test_stale_index_lock_after_power_loss_is_recovered(env):
+    """Stromausfall während `git merge`: verwaistes index.lock. Beim nächsten Start: Sperre weg, alter Stand läuft."""
+    from watchdog.updater import Updater
+    started(env)
+    good = env.head()
+    bad = env.push("v2 halb eingespielt", VERSION="2\n")
+    env.up._set_state(pending={"prev": good, "target": bad})
+    env.mgr.stop(5)
+    git(env.app, "fetch", "-q")
+    git(env.app, "merge", "--ff-only", "-q", "origin/main")
+    lock = _lock(env, 3600)
+    up2 = Updater(env.cfg, env.mgr)
+    up2.startup()
+    _wait_job(up2)
+    assert up2.job["ok"] is True, up2.job["message"]
+    assert not lock.exists()
+    assert env.head() == good and env.version() == "1"
+
+
+def test_restore_never_leaves_the_program_stopped_even_if_git_fails(env):
+    """Frische Sperre (nicht verwaist) → git reset scheitert. Das Programm muss trotzdem wieder gestartet werden."""
+    started(env)
+    good = env.head()
+    lock = _lock(env, 0)
+    try:
+        ok, why = env.up._restore(good)
+    finally:
+        lock.unlink()
+    assert not ok and "fehlgeschlagen" in why and "läuft wieder" in why, why
+    assert env.version() == "1"                                      # läuft
+    assert env.up.status()["app"] == "running"
+
+
+def test_update_with_fresh_index_lock_is_refused_before_stopping(env):
+    started(env)
+    pid = env.mgr._proc.pid
+    env.push("v2", VERSION="2\n")
+    lock = _lock(env, 0)
+    try:
+        ok, msg = env.up.run("update")
+    finally:
+        lock.unlink()
+    assert not ok and "index.lock" in msg and "nichts gestoppt" in msg, msg
+    assert env.mgr._proc is not None and env.mgr._proc.pid == pid     # wurde nicht angehalten
+    assert env.up.state["blocked"] is None
+
+
+def test_update_removes_a_stale_index_lock_and_succeeds(env):
+    started(env)
+    env.push("v2", VERSION="2\n")
+    lock = _lock(env, 3600)
+    ok, msg = env.up.run("update")
+    assert ok, msg
+    assert not lock.exists() and env.version() == "2"
+
+
+def test_git_calls_never_take_optional_locks(monkeypatch):
+    """`git status` der Statusabfrage (alle 3 s) darf kein index.lock anlegen, sonst scheitern Updates zufällig."""
+    from watchdog import gitops
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw["env"])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(gitops.subprocess, "run", fake_run)
+    gitops.is_dirty("/tmp")
+    assert seen.get("GIT_OPTIONAL_LOCKS") == "0"
+
+
+def test_clear_stale_index_lock_never_raises(tmp_path):
+    from watchdog import gitops
+    assert gitops.clear_stale_index_lock(str(tmp_path / "gibtsnicht")) is True      # keine Sperre
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "index.lock").mkdir()                                     # kaputt: Verzeichnis statt Datei
+    t = time.time() - 3600
+    os.utime(tmp_path / ".git" / "index.lock", (t, t))
+    assert gitops.clear_stale_index_lock(str(tmp_path)) is False                   # nicht löschbar, aber kein Absturz

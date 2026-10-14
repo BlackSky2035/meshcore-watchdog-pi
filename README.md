@@ -114,7 +114,12 @@ cd ~/meshcore-watchdog && git status --short && git pull --ff-only origin main &
    Bis hier wird nichts angehalten – ein Netzfehler schadet nicht.
 2. Programm stoppen, `git merge --ff-only`, bei geänderter `requirements.txt` `pip install`, starten.
 3. Gesundheitsprüfung: Dienst aktiv **und** `health_url` antwortet **und** bleibt `stable_s` Sekunden stabil.
-4. Schlägt etwas fehl: automatisch zurück auf den vorherigen Commit, neu starten, prüfen.
+4. Schlägt etwas fehl: automatisch zurück auf den vorherigen Commit, neu starten, prüfen. Das Programm wird dabei **immer**
+   wieder gestartet, auch wenn das Zurücksetzen per git scheitert (Platte voll, gesperrt) – dann mit dem vorhandenen Stand und
+   einer Fehlermeldung. Ein verwaistes `.git/index.lock` (älter als 2 min, z. B. nach Stromausfall mitten im Update) wird entfernt;
+   ein frisches (anderer git-Befehl läuft) führt dazu, dass das Update vor dem Stoppen abgelehnt wird.
+   Alle git-Aufrufe laufen mit `GIT_OPTIONAL_LOCKS=0`: die Statusabfrage alle 3 s (`git status`) sperrt Git dadurch nicht mehr kurz,
+   vorher scheiterten Updates und Wiederherstellungen damit zufällig.
    Der fehlerhafte Commit wird als „blocked“ gemerkt und nicht erneut versucht (außer mit „erzwingen“).
    Erst ein neuer Commit auf GitHub wird wieder angeboten.
 

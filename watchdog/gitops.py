@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
+from pathlib import Path
 
 
 class GitError(Exception):
@@ -10,7 +12,9 @@ class GitError(Exception):
 
 
 def _run(repo: str, *args: str, timeout: float = 60) -> str:
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}   # nie nach Passwort fragen
+    # nie nach Passwort fragen; GIT_OPTIONAL_LOCKS=0: `git status` (Statusabfrage alle 3 s) legt kein index.lock an –
+    # sonst scheiterte ein gleichzeitiges Update/Zurücksetzen zufällig an „Unable to create index.lock“
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"}
     try:
         p = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
                            timeout=timeout, env=env)
@@ -62,6 +66,34 @@ def merge_ff(repo: str, remote: str, branch: str) -> None:
 
 def reset_hard(repo: str, commit: str) -> None:
     _run(repo, "reset", "--hard", "--quiet", commit)
+
+
+STALE_LOCK_S = 120          # jeder git-Aufruf des Watchdogs ist nach höchstens 90 s beendet; älter = Überbleibsel (Stromausfall, SIGKILL)
+
+
+def index_lock(repo: str) -> Path:
+    return Path(repo) / ".git" / "index.lock"
+
+
+def clear_stale_index_lock(repo: str, older_than_s: float = STALE_LOCK_S, now=time.time) -> bool:
+    """Entfernt ein verwaistes .git/index.lock. Ein frisches (anderer git-Prozess läuft gerade) bleibt unangetastet.
+    True = jetzt ist keine Sperre (mehr) da. Wirft nie."""
+    lock = index_lock(repo)
+    try:
+        age = now() - lock.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if age < older_than_s:
+        return False
+    try:
+        lock.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
 
 
 def untracked_collisions(repo: str, old: str, new: str) -> list[str]:
