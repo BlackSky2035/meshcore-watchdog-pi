@@ -33,13 +33,25 @@ from . import __version__, gitops
 from .config import Config
 from .gitops import GitError
 from .logstore import JobRecorder, LogStore
-from .managers import Manager, ManagerError
+from .managers import STOP_MARGIN_S, Manager, ManagerError
 
 log = logging.getLogger("watchdog")
 
 JOB_LOG_LIMIT = 300
 MAX_JOB_S = 1800          # ein Lauf, der länger „läuft“, gilt als hängengeblieben und blockiert nichts mehr
 POLL_S = 0.5
+
+
+def max_job_s(cfg) -> float:
+    """Zeit, nach der ein Lauf als hängengeblieben gilt: mindestens MAX_JOB_S, aber immer länger als der schlimmste Fall eines Updates
+    MIT Zurückspielen (je zweimal Stoppen, Abhängigkeiten installieren, Startprüfung, dazu Git-Aufrufe und Reserve). Wer z. B.
+    `install_timeout_s` hochsetzt, bekommt so nie einen zweiten Lauf parallel zu einem noch arbeitenden ersten."""
+    try:
+        stop = max(60.0, float(cfg.stop_timeout_s) + STOP_MARGIN_S)
+        worst = 2 * (stop + float(cfg.install_timeout_s) + float(cfg.health_timeout_s)) + 6 * float(cfg.git_timeout_s) + 120
+        return max(float(MAX_JOB_S), worst)
+    except Exception:                         # Notbetrieb/kaputte Werte: fester Wert
+        return float(MAX_JOB_S)
 HEALTH_POLL_IDLE_S = 30.0    # Gesundheits-URL des Hauptprogramms nur so oft wirklich abfragen (reine Status-Anzeige)
 HEALTH_POLL_BUSY_S = 2.0     # ... außer während eines laufenden Vorgangs (check/update/restart): dann öfter
 MAX_RECOVER_TRIES = 3        # so oft wird ein unterbrochenes Update beim Start wiederhergestellt, dann aufgegeben (kein Neustart-Kreislauf)
@@ -173,11 +185,12 @@ class Updater:
         """Belegt die Sperre. Gibt die Nummer des neuen Laufs zurück (immer ≥ 1) oder False."""
         with self._lock:
             if self.job["running"]:
-                if time.monotonic() - self._started_mono < MAX_JOB_S:
+                limit = max_job_s(self.cfg)
+                if time.monotonic() - self._started_mono < limit:
                     return False
                 # Hängengebliebener Lauf (Thread tot oder festgefahren): freigeben, damit der Watchdog
                 # nie dauerhaft „es läuft bereits eine Aktion“ meldet
-                log.error("Lauf %r hängt seit über %d s – wird freigegeben", self.job.get("name"), MAX_JOB_S)
+                log.error("Lauf %r hängt seit über %d s – wird freigegeben", self.job.get("name"), limit)
                 self.job.update(running=False, finished=time.time(), ok=False,
                                 message="Abgebrochen: der Lauf hat nicht mehr reagiert")
                 self._release_locked()

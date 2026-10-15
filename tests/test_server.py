@@ -57,6 +57,36 @@ def test_token(web):
     assert call(base + "/api/status")[0] == 200            # Lesen bleibt offen
 
 
+@pytest.mark.parametrize("token", ["geheim", "Bär", "grün🙂"])
+def test_token_with_umlauts_and_emoji(web, token):
+    """Früher: Umlaut im Token → TypeError im Vergleich → jeder POST 500. Die Oberfläche schickt das Token als UTF-8-Bytes."""
+    base = web(token=token)
+    h = {"X-Watchdog": "1"}
+    as_ui = token.encode("utf-8").decode("latin-1")          # so kommt es von der Oberfläche (TextEncoder) und von curl an
+    assert call(base + "/api/check", "POST", {**h, "X-Token": as_ui})[0] == 202
+    env_up_wait(web)
+    assert call(base + "/api/check", "POST", {**h, "X-Token": "falsch"})[0] == 401
+    try:
+        latin = token.encode("latin-1").decode("latin-1")    # älterer Weg: „ä“ als ein Latin-1-Byte
+    except UnicodeEncodeError:
+        return
+    assert call(base + "/api/check", "POST", {**h, "X-Token": latin})[0] in (202, 409)
+
+
+def env_up_wait(_web, timeout=5.0):
+    time.sleep(0.3)                                          # „check“ läuft im Hintergrund; danach ist die Sperre wieder frei
+
+
+def test_metrics_limit_is_capped(web, env):
+    from watchdog import server as S
+    base = web()
+    asked = []
+    env.srv.status_cache.sys.history = lambda n: asked.append(n) or []
+    for q in ("limit=0", "limit=-5", "limit=100000", "limit=200", "limit=abc"):
+        assert call(base + "/api/metrics?" + q)[0] == 200
+    assert asked == [200, 200, S.METRICS_MAX_POINTS, 200, 200]
+
+
 def test_metrics_endpoint(web):
     base = web()
     code, body = call(base + "/api/metrics")

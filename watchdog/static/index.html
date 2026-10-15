@@ -179,7 +179,8 @@ function ago(ts) {
 function headers() {
   const h = {'Content-Type': 'application/json', 'X-Watchdog': '1'};
   const t = sessionStorage.getItem('wd-token');
-  if (t) h['X-Token'] = t;
+  // als UTF-8-Bytes schicken: Header dürfen nur Zeichen bis 0xFF enthalten, ein Token mit Emoji ließe fetch sonst scheitern
+  if (t) h['X-Token'] = String.fromCharCode(...new TextEncoder().encode(t));
   return h;
 }
 

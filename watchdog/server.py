@@ -107,6 +107,22 @@ class _DeadlineReader(io.RawIOBase):
         return self._sock.recv_into(b)
 
 
+METRICS_MAX_POINTS = 1000     # /api/metrics: höchstens so viele (verdichtete) Messpunkte je Abfrage; die Oberfläche fragt 200
+
+
+def token_matches(given: str | None, expected: str) -> bool:
+    """Token vergleichen, auch mit Umlauten/Emojis. Header kommen bei http.server als Latin-1-Text an: die Oberfläche schickt
+    das Token als UTF-8-Bytes (wie curl), dann ergibt `encode("latin-1")` genau diese Bytes. Ein Browser, der „ä“ selbst als
+    ein Latin-1-Byte schickt, passt über den zweiten Vergleich. Früher: `compare_digest` mit Nicht-ASCII-Text → TypeError → 500."""
+    g = given or ""
+    exp = (expected or "").encode("utf-8")
+    try:
+        raw = g.encode("latin-1")
+    except UnicodeEncodeError:
+        raw = g.encode("utf-8")
+    return hmac.compare_digest(raw, exp) | hmac.compare_digest(g.encode("utf-8"), exp)
+
+
 def is_local_peer(peer_ip: str, own_ip: str | None = None) -> bool:
     """Kommt die Verbindung vom Rechner selbst (Loopback oder eigene Adresse)? Wirft nie."""
     try:
@@ -236,6 +252,7 @@ def make_handler(cfg: Config, updater, cache=None):
                     n = int(dict(p.split("=", 1) for p in query.split("&") if "=" in p).get("limit", 200))
                 except ValueError:
                     n = 200
+                n = min(METRICS_MAX_POINTS, n) if n > 0 else 200     # 0/negativ hieß früher „alles“ (bis 40 000 Werte)
                 sys_watch = getattr(cache, "sys", None) if cache else None
                 try:
                     samples = sys_watch.history(n) if sys_watch else []
@@ -282,7 +299,7 @@ def make_handler(cfg: Config, updater, cache=None):
                 return self._json(403, {"error": HOST_FORBIDDEN})
             if self.headers.get("X-Watchdog") != "1":
                 return self._json(403, {"error": "Header X-Watchdog: 1 fehlt"})
-            if cfg.token and not hmac.compare_digest(self.headers.get("X-Token", ""), cfg.token):
+            if cfg.token and not token_matches(self.headers.get("X-Token"), cfg.token):
                 return self._json(401, {"error": "Token fehlt oder ist falsch"})
 
             body = {}

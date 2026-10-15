@@ -71,6 +71,10 @@ Eigenständiges Repo. Verwaltet das Hauptprogramm `meshcore-remote` (anderes Rep
   Last-Regeln (nicht aufweichen): nie im Takt, nur nach einem Einbruch; ≥12 s Wartezeit, ≥30 s Abstand, Einbrüche gebündelt, Zeitlimit 3 s, ≤64 KB, ein Thread, nie im Anfragepfad;
   Fehler einmal als Notiz, keine Wiederholung. Die Messung in `power.py` streckt ihren Takt bei langsamen Aufrufen (bis 10 s). Tests: `tests/test_sends.py`.
 
+- Token-Vergleich nur über `server.token_matches` (Bytes; Header als Latin-1 → UTF-8-Bytes der Oberfläche, `TextEncoder` in `index.html`), nie `compare_digest` mit Text
+  (Umlaut → TypeError → 500). `/api/metrics`: `limit` ≤ `METRICS_MAX_POINTS` (1000), 0/negativ → 200. Tests: `tests/test_server.py`.
+- Wartungsmodus bleibt im Notbetrieb (kaputte Konfiguration, kein Token) BEWUSST ohne Token schaltbar: Notausschalter fürs Senden.
+
 ## Vor jedem Push auf GitHub
 Bevor eine KI selbst nach GitHub pusht, **immer beide Projekte** (dieses und das Hauptprogramm) auf die vereinbarten
 Absicherungen prüfen. Nur pushen, wenn alles unten erfüllt ist; sonst zuerst beheben oder den Nutzer informieren und NICHT pushen.
@@ -81,7 +85,7 @@ Das Ergebnis der Prüfung (kurz, Punkt für Punkt) dem Nutzer mitteilen.
 2. Alle Handler laufen über `_guarded` (Fehler → JSON-500, nie Abbruch); `/api/ping` greift auf nichts zu.
 3. Server-Schleife (`serve`) baut den HTTP-Server nach Absturz/belegtem Port neu auf; Verbindungslimit und Socket-Timeout aktiv.
 4. Notbetrieb (`FallbackUpdater`/`load_config_safe`/`build_updater`): kaputte Konfiguration oder Manager stoppen den Server nicht.
-5. Lauf-Sperre wird immer frei (`_finish`, `MAX_JOB_S` über die monotone Uhr; Laufnummer `_gen`, ein freigegebener alter Lauf berührt den neuen nie); `status()` fängt Abschnitte einzeln ab.
+5. Lauf-Sperre wird immer frei (`_finish`, `max_job_s(cfg)` = max(`MAX_JOB_S`, schlimmster Fall Update + Zurückspielen aus den Zeitlimits) über die monotone Uhr; Laufnummer `_gen`, ein freigegebener alter Lauf berührt den neuen nie); `status()` fängt Abschnitte einzeln ab.
 6. systemd-Herzschlag (`Heartbeat`, `WatchdogSec`, `Restart=always`) unverändert vorhanden.
 7. Protokoll-Datenbank (`logstore.py`) wirft nie und blockiert nie.
 8. Nur Standardbibliothek, keine neue Abhängigkeit.

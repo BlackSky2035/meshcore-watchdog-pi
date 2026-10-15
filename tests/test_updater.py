@@ -422,7 +422,7 @@ def test_stuck_check_uses_monotonic_clock_not_wall_clock(env):
 def test_late_finish_of_a_released_stuck_run_does_not_touch_the_new_run(env, monkeypatch):
     """Ein als hängend freigegebener Lauf endet später doch: er darf den neuen Lauf weder beenden noch dessen Sperre lösen."""
     import threading
-    from watchdog.updater import MAX_JOB_S, Updater
+    from watchdog.updater import Updater, max_job_s
     go, inside = threading.Event(), threading.Event()
 
     def slow_restart():
@@ -433,8 +433,8 @@ def test_late_finish_of_a_released_stuck_run_does_not_touch_the_new_run(env, mon
     monkeypatch.setattr(env.up, "op_restart", slow_restart)
     assert env.up.start("restart")
     assert inside.wait(5)
-    env.up.job["started"] -= MAX_JOB_S + 100              # gilt jetzt als hängend (beide Uhren zurückdrehen)
-    env.up._started_mono -= MAX_JOB_S + 100
+    env.up.job["started"] -= max_job_s(env.cfg) + 100     # gilt jetzt als hängend (beide Uhren zurückdrehen)
+    env.up._started_mono -= max_job_s(env.cfg) + 100
     assert env.up._begin("check")                         # neuer Lauf übernimmt
     try:
         go.set()
@@ -712,3 +712,22 @@ def test_clear_stale_index_lock_never_raises(tmp_path):
     t = time.time() - 3600
     os.utime(tmp_path / ".git" / "index.lock", (t, t))
     assert gitops.clear_stale_index_lock(str(tmp_path)) is False                   # nicht löschbar, aber kein Absturz
+
+
+def test_job_limit_covers_worst_case_update_with_rollback(env):
+    """Ein Lauf gilt erst als hängengeblieben, wenn er länger dauert als ein Update samt Zurückspielen dauern darf."""
+    from watchdog.updater import MAX_JOB_S, max_job_s
+    cfg = env.cfg
+    cfg.install_timeout_s, cfg.health_timeout_s, cfg.stop_timeout_s, cfg.git_timeout_s = 600, 45, 15, 90
+    worst = 2 * (60 + 600 + 45) + 6 * 90
+    assert max_job_s(cfg) > worst and max_job_s(cfg) >= MAX_JOB_S
+    cfg.install_timeout_s = 3000                           # langsamer Pi: Grenze wächst mit
+    assert max_job_s(cfg) > 2 * 3000
+
+
+def test_job_limit_with_broken_settings_falls_back():
+    from types import SimpleNamespace
+
+    from watchdog.updater import MAX_JOB_S, max_job_s
+    assert max_job_s(SimpleNamespace(stop_timeout_s="x", install_timeout_s=1, health_timeout_s=1, git_timeout_s=1)) == MAX_JOB_S
+    assert max_job_s(None) == MAX_JOB_S

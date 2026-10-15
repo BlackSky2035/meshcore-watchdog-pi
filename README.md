@@ -168,7 +168,8 @@ Die ausführliche Checkliste (Passwort im Hauptprogramm, Firewall, SSH, Router, 
 - `host = "0.0.0.0"` nur, wenn es nicht anders geht, und dann **immer** mit `token`
   (Klartext im LAN!). Die Weboberfläche fragt danach und merkt es nur für die Browsersitzung.
 - Ändernde Aktionen verlangen den Header `X-Watchdog: 1` (Schutz vor fremden Webseiten im Browser) und
-  bei gesetztem Token `X-Token`. Lesen (`/api/status`) ist ohne Token möglich (aber nur mit erlaubtem Host-Namen, s. o.).
+  bei gesetztem Token `X-Token`. Das Token darf Umlaute und andere Sonderzeichen enthalten (die Oberfläche schickt es als UTF-8; früher endete
+  dann jede Aktion mit Fehler 500). Lesen (`/api/status`) ist ohne Token möglich (aber nur mit erlaubtem Host-Namen, s. o.).
 - Mit `systemctl_command = "sudo systemctl"` laufen nur `start`/`stop` über sudo; die Statusabfrage `is-active` (alle 3 s) immer ohne sudo
   (braucht kein root, sonst schriebe sudo laufend ins Journal). Nur mit Fake-`systemctl`/Fake-`sudo` getestet, nicht auf echtem systemd.
 - Wird der Watchdog über Tailscale (`tailscale serve`) erreichbar gemacht, ist er für alle Geräte deines Tailnets offen. Setze dann ein `token` und beschränke Port 8443 per Tailscale-ACL.
@@ -179,6 +180,9 @@ Die ausführliche Checkliste (Passwort im Hauptprogramm, Firewall, SSH, Router, 
 ## API
 `GET /api/ping` (kostet nichts, für Selbstprüfung), `GET /api/status`, `GET /api/log?lines=100` (auch mit `since`/`until`), `GET /api/metrics`, `GET /api/runs` und `GET /api/runs/<id>` (Ablauf-Verlauf);
 `POST /api/{check,update,restart,start,stop,rollback}` (202 gestartet, 409 es läuft schon eine Aktion, 401 Token, 403 Header `X-Watchdog: 1` fehlt). `update` akzeptiert `{"force": true}`.
+Ein Lauf gilt erst als hängengeblieben (Sperre wird frei), wenn er länger dauert als ein Update samt Zurückspielen dauern darf: mindestens
+30 min, bei größeren Zeitlimits in der Konfiguration (z. B. `install_timeout_s`) entsprechend länger. `GET /api/metrics?limit=N` liefert
+höchstens 1000 verdichtete Messpunkte (die Oberfläche fragt 200).
 Wartungsmodus: `POST /api/maintenance` mit `{"minutes": 5–1440}` und `POST /api/maintenance-end`. Alle ändernden Aktionen verlangen `X-Watchdog: 1` und bei gesetztem Token `X-Token`.
 
 ## Anforderungen ans Hauptprogramm
